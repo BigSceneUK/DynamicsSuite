@@ -55,15 +55,17 @@ def render() -> None:
     org_url = st.text_input(
         "Dataverse / CRM URL",
         value=config.DEFAULT_ORG_URL,
-        help="e.g. https://yourorg.crm11.dynamics.com",
+        placeholder="https://<yoursite>.dynamics.com/",
+        help="e.g. https://<yoursite>.dynamics.com/",
     )
+    st.caption("Example: `https://<yoursite>.dynamics.com/`")
 
     with st.expander("⚙️ Advanced Settings"):
         client_id = st.text_input(
             "Application (Client) ID",
-            value="",
-            placeholder=config.DEFAULT_CLIENT_ID,
-            help="Azure AD App Registration Client ID (falls back to default if left blank)",
+            value=config.DEFAULT_CLIENT_ID,
+            placeholder="04b07795-8ddb-461a-bbee-02f9e1bf7b46",
+            help="Azure AD App Registration Client ID",
         )
         tenant_id = st.text_input(
             "Directory (Tenant) ID",

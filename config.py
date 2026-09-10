@@ -6,7 +6,7 @@
 # Replace with your own App Registration Client ID.
 # Register at: https://portal.azure.com → Azure Active Directory → App Registrations
 # Required settings: Platform = "Mobile and desktop applications", Redirect URI = http://localhost
-DEFAULT_CLIENT_ID = ""
+DEFAULT_CLIENT_ID = "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
 DEFAULT_TENANT_ID = "common"
 
 # Power Platform / Dataverse environment
