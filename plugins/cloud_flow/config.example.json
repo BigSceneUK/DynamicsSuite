@@ -1,0 +1,10 @@
+{
+  "detail_fields": [
+    "Operation",
+    "Fetch XML",
+    "Update Action",
+    "Update Payload",
+    "regardingobjectid",
+    "statuscode"
+  ]
+}

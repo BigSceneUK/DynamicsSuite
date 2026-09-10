@@ -1,0 +1,2 @@
+# Solution packager dependencies
+streamlit>=1.36.0

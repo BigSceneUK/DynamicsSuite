@@ -1,0 +1,5 @@
+# cloud_flow plugin dependencies
+streamlit>=1.36.0
+requests>=2.31.0
+pandas>=2.0.0
+numpy>=1.26.0     # used directly in ui.py

@@ -1,0 +1,2 @@
+# Plugin Development Project Template requirements
+streamlit>=1.36.0

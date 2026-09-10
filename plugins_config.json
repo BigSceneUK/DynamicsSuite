@@ -1,0 +1,34 @@
+{
+  "audit_history": {
+    "enabled": true
+  },
+  "cloud_flow": {
+    "enabled": true,
+    "config": {
+      "detail_fields": [
+        "crimson_application",
+        "crimson_applicantbannerid",
+        "crimson_applicationreference",
+        "crimson_bannerid"
+      ]
+    }
+  },
+  "plugin_template": {
+    "enabled": true
+  },
+  "portal_inspector": {
+    "enabled": true
+  },
+  "portal_webapi_auditor": {
+    "enabled": true
+  },
+  "record_transporter": {
+    "enabled": true
+  },
+  "solution_packager_ui": {
+    "enabled": true
+  },
+  "table_inspector": {
+    "enabled": true
+  }
+}
