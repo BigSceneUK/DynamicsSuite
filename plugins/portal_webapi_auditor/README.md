@@ -37,7 +37,7 @@ The **Power Page API Wildcard Auditor** scans your site settings, runs static co
 ### 1. Run the Security Audit
 1. Connect to your Dataverse environment in DynamicsSuite.
 2. Select your Power Pages website from the dropdown.
-3. Click **🔍 Start Audit**. The plugin will scan:
+3. Click **🔍 Deep Scan Code**. The plugin will scan:
    * Active Site Settings matching `Webapi/*/fields`
    * Portal JavaScript libraries and inline scripts
    * Liquid templates containing Web API queries
