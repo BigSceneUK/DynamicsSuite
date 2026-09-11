@@ -44,7 +44,6 @@ DynamicsSuite comes bundled with an enterprise toolset for Dynamics 365 and Powe
 | 📜 | **Audit History Explorer** | Fast search and timeline analysis of Dataverse audit logs, field-level change diffs, and compliance reporting. |
 | ⚡ | **Cloud Flow Analytics** | Health check, telemetry analysis, and run history inspector for Power Automate cloud flows. |
 | 🚚 | **Record Transporter** | Export, transport, and synchronize configuration and master data across development, test, and production Dataverse instances. |
-| 📦 | **Solution Packager UI** | Visual interface for unpacking and packing Dataverse solution zip files into source control friendly folders. |
 | 🌐 | **Power Pages Portal Inspector** | Deep inspection of portal entities, webpages, web files, templates, and content snippets. |
 | 🧩 | **Plugin Development Template** | Authoritative reference template and guide for building custom plugins for DynamicsSuite. |
 
