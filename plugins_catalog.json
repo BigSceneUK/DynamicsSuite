@@ -1,6 +1,6 @@
 {
   "catalog_version": "1.0.0",
-  "updated_at": "2026-09-11T00:36:59Z",
+  "updated_at": "2026-09-11T15:00:37Z",
   "plugins": [
     {
       "id": "plugin_template",
@@ -57,7 +57,7 @@
       "description": "Audit Power Pages Web API site settings for deprecated '*' wildcards, scan portal JS/HTML for table & field usage, drill down into calling components, and 1-click update field whitelists.",
       "icon": "🛡️",
       "download_url": "https://bigscene.uk/DynamicsSuite/releases/portal_webapi_auditor.zip",
-      "sha256": "2e3b03436adebd90d5360a0ab36b9a8f9a7b758cf4d8ba5569f6f941f6f5548e",
+      "sha256": "b9102643e9df0a3b07e4fd94b5c6e389aae846f0250ac28f947e580973f3f0b6",
       "tags": [
         "Security",
         "Power Pages",
@@ -145,7 +145,7 @@
       "description": "Browse execution history for solution-aware Cloud Flows. Search by flow name or date range via the Dataverse API, with optional Power Automate API for richer run details.",
       "icon": "⚡",
       "download_url": "https://bigscene.uk/DynamicsSuite/releases/cloud_flow.zip",
-      "sha256": "35ae4d4d55a5a239d65ff7f18c7c458d06b08c35083d20dd29019bb7a3a8f4ea",
+      "sha256": "8659a5039e861d3791a427a8f7b8cb04ef34c6066e96114cca7625f1adb45eac",
       "tags": [
         "Power Automate",
         "Flow",

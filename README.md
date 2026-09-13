@@ -2,6 +2,7 @@
 
 A unified, zero-admin desktop and local portal for **Microsoft Dynamics 365**, **Dataverse**, and **Power Platform** tools. DynamicsSuite runs all developer, administration, and auditing utilities as modular, independently loadable plugins under a single, centralized Microsoft Entra ID (MSAL) authentication layer — one URL, one sign-in.
 
+- Official web site -> https://dynamicssuite.bigscene.uk/
 ---
 
 ## 🤖 About This Project & AI Development
