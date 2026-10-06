@@ -22,10 +22,20 @@ if ! command -v uv &> /dev/null; then
     fi
 fi
 
-# 2. Ensure virtual environment exists (seeded with pip for plugin manager compatibility)
-if [ ! -d ".venv" ]; then
-    echo "🔨 Creating virtual environment with uv (.venv)..."
-    uv venv --seed .venv
+# 2. Ensure virtual environment exists (seeded with pip) and satisfies Python >= 3.10
+RECREATE_VENV=0
+if [ -f ".venv/bin/python3" ]; then
+    if ! .venv/bin/python3 -c "import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)" 2>/dev/null; then
+        echo "⚠️ Existing virtual environment uses an older Python (< 3.10). Recreating with Python 3.11..."
+        RECREATE_VENV=1
+    fi
+else
+    RECREATE_VENV=1
+fi
+
+if [ "$RECREATE_VENV" -eq 1 ]; then
+    echo "🔨 Creating virtual environment with Python 3.11 using uv (.venv)..."
+    uv venv --clear --python 3.11 --seed .venv
 fi
 
 # 3. Synchronize / install core requirements
