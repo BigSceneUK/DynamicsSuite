@@ -48,16 +48,25 @@ if "%RECREATE_VENV%"=="1" (
     if errorlevel 1 goto :VENV_FAILED
 )
 
-REM 3. Install core dependencies
-echo [deps] Checking and installing dependencies with uv...
-uv pip install pip -r requirements.txt
-if errorlevel 1 goto :DEPS_FAILED
+REM 3. Check if dependencies need installation
+set "DO_INSTALL=0"
+if "%RECREATE_VENV%"=="1" set "DO_INSTALL=1"
+if not exist ".venv\Scripts\streamlit.exe" set "DO_INSTALL=1"
+if /i "%~1"=="--update" set "DO_INSTALL=1"
+if /i "%~1"=="-u" set "DO_INSTALL=1"
 
-REM 4. Install plugin dependencies if install_plugins.py exists
-if exist "install_plugins.py" (
-    if exist ".venv\Scripts\python.exe" (
-        ".venv\Scripts\python.exe" install_plugins.py
+if "%DO_INSTALL%"=="1" (
+    echo [deps] Installing dependencies with uv...
+    uv pip install pip -r requirements.txt
+    if errorlevel 1 goto :DEPS_FAILED
+
+    if exist "install_plugins.py" (
+        if exist ".venv\Scripts\python.exe" (
+            ".venv\Scripts\python.exe" install_plugins.py
+        )
     )
+) else (
+    echo [deps] Virtual environment ready. Launching immediately...
 )
 
 REM 5. Launch Streamlit app

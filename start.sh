@@ -39,12 +39,21 @@ if [ "$RECREATE_VENV" -eq 1 ]; then
 fi
 
 # 3. Synchronize / install core requirements
-echo "⚡ Checking and installing dependencies with uv..."
-uv pip install -r requirements.txt
+DO_INSTALL=0
+if [ "$RECREATE_VENV" -eq 1 ] || [ ! -f ".venv/bin/streamlit" ] || [ "$1" = "--update" ] || [ "$1" = "-u" ]; then
+    DO_INSTALL=1
+fi
 
-# Run install_plugins.py to ensure all discovered plugins have dependencies installed
-if [ -f "install_plugins.py" ]; then
-    .venv/bin/python3 install_plugins.py
+if [ "$DO_INSTALL" -eq 1 ]; then
+    echo "⚡ Installing dependencies with uv..."
+    uv pip install -r requirements.txt
+
+    # Run install_plugins.py to ensure all discovered plugins have dependencies installed
+    if [ -f "install_plugins.py" ]; then
+        .venv/bin/python3 install_plugins.py
+    fi
+else
+    echo "⚡ Virtual environment ready. Launching immediately..."
 fi
 
 # 4. Launch Streamlit app

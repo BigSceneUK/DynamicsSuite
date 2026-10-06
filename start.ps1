@@ -61,13 +61,19 @@ if ($recreateVenv) {
     uv venv --python 3.11 .venv
 }
 
-Write-Host "[deps] Checking and installing dependencies with uv..." -ForegroundColor Green
-uv pip install pip -r requirements.txt
+$doInstall = $recreateVenv -or (-not (Test-Path ".venv\Scripts\streamlit.exe")) -or ($args -contains "--update") -or ($args -contains "-u")
 
-if (Test-Path "install_plugins.py") {
-    if (Test-Path ".venv\Scripts\python.exe") {
-        & ".venv\Scripts\python.exe" install_plugins.py
+if ($doInstall) {
+    Write-Host "[deps] Installing dependencies with uv..." -ForegroundColor Green
+    uv pip install pip -r requirements.txt
+
+    if (Test-Path "install_plugins.py") {
+        if (Test-Path ".venv\Scripts\python.exe") {
+            & ".venv\Scripts\python.exe" install_plugins.py
+        }
     }
+} else {
+    Write-Host "[deps] Virtual environment ready. Launching immediately..." -ForegroundColor Green
 }
 
 Write-Host "[launch] Launching Dynamics Suite..." -ForegroundColor Cyan
