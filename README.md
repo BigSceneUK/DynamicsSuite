@@ -2,7 +2,9 @@
 
 A unified, zero-admin desktop and local portal for **Microsoft Dynamics 365**, **Dataverse**, and **Power Platform** tools. DynamicsSuite runs all developer, administration, and auditing utilities as modular, independently loadable plugins under a single, centralized Microsoft Entra ID (MSAL) authentication layer — one URL, one sign-in.
 
-- Official web site -> https://dynamicssuite.bigscene.uk/
+- Official Website: [dynamicssuite.bigscene.uk](https://dynamicssuite.bigscene.uk/)
+- Latest Releases: [GitHub Releases](https://github.com/BigSceneUK/DynamicsSuite/releases)
+- Version History: [CHANGELOG.md](CHANGELOG.md)
 ---
 
 ## 🤖 About This Project & AI Development
@@ -61,8 +63,8 @@ DynamicsSuite comes bundled with an enterprise toolset for Dynamics 365 and Powe
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/BigSceneUK/DynamcisSuite.git
-cd DynamcisSuite
+git clone https://github.com/BigSceneUK/DynamicsSuite.git
+cd DynamicsSuite
 
 # 2. Create and activate a virtual environment
 python3 -m venv .venv
@@ -128,11 +130,17 @@ Refer to the bundled `plugins/plugin_template/` for full details on UI layout, t
 ## 🤝 Contributing
 
 We welcome community contributions!
-1. **Fork** the repository: `https://github.com/BigSceneUK/DynamcisSuite`
+1. **Fork** the repository: `https://github.com/BigSceneUK/DynamicsSuite`
 2. **Create** your feature or bug fix branch (`git checkout -b feature/amazing-plugin`)
 3. **Commit** your changes with clear messages (`git commit -m 'feat: add security scanner plugin'`)
 4. **Push** to the branch (`git push origin feature/amazing-plugin`)
 5. **Open a Pull Request** on GitHub for review and testing.
+
+---
+
+## 📜 Changelog & Version History
+
+Detailed notes for every release of DynamicsSuite Core and plugins are maintained in **[CHANGELOG.md](CHANGELOG.md)** and on the **[GitHub Releases](https://github.com/BigSceneUK/DynamicsSuite/releases)** page.
 
 ---
 
