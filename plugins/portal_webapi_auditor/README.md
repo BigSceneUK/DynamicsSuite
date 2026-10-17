@@ -64,11 +64,11 @@ The **Power Page API Wildcard Auditor** scans your site settings, runs static co
 4. Clear your portal server cache to activate the updated whitelist.
 
 ### 5. Dual-Name Support for Lookups (`@odata.bind`)
-* **Logical Name vs. Schema Name**: In Dataverse, every column possesses a lowercase **Logical Name** (e.g., `crimson_student`) and an original **Schema Name** (e.g., `crimson_Student`).
+* **Logical Name vs. Schema Name**: In Dataverse, every column possesses a lowercase **Logical Name** (e.g., `app_candidate`) and an original **Schema Name** (e.g., `app_Candidate`).
 * **Power Pages Web API OData v4 Rule**:
-  * **GET (Reading)** requests use the lowercase Logical Name (`crimson_student` / `_crimson_student_value`).
-  * **POST / PATCH (Creating / Updating)** on Lookups requires OData Navigation Properties with `@odata.bind` (e.g., `"crimson_Student@odata.bind": "/contacts(...)"`), which strictly matches the case-sensitive **Schema Name**.
-* **Automatic Dual Registration**: The Auditor automatically discovers and includes **both** the lowercase Logical Name and the capital-letter Schema Name in `Webapi/<table>/fields` (e.g., `crimson_student,crimson_Student`), eliminating Power Pages error `90040101` ("Attribute is not enabled").
+  * **GET (Reading)** requests use the lowercase Logical Name (`app_candidate` / `_app_candidate_value`).
+  * **POST / PATCH (Creating / Updating)** on Lookups requires OData Navigation Properties with `@odata.bind` (e.g., `"app_Candidate@odata.bind": "/contacts(...)"`), which strictly matches the case-sensitive **Schema Name**.
+* **Automatic Dual Registration**: The Auditor automatically discovers and includes **both** the lowercase Logical Name and the capital-letter Schema Name in `Webapi/<table>/fields` (e.g., `app_candidate,app_Candidate`), eliminating Power Pages error `90040101` ("Attribute is not enabled").
 
 ---
 

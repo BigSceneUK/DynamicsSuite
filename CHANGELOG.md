@@ -13,9 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Dataverse Column Casing & Lookup `@odata.bind` Dual-Registration**:
   - Fixed Power Pages runtime Error `90040101` (*"Attribute <SchemaName> is not enabled for Web API"*).
   - Dataverse columns possess two internal names:
-    - **Logical Name**: Always lowercase (e.g. `crimson_student`). Used by OData `GET` reading queries.
-    - **Schema Name**: Preserves original mixed-case capitalization (e.g. `crimson_Student`). Used by Power Pages OData `POST` / `PATCH` requests on Lookup fields using `@odata.bind` notation (e.g., `"crimson_Student@odata.bind": "/contacts(...)"`).
-  - Power Pages gatekeeper checks the stripped property name against the `Webapi/<table_name>/fields` whitelist. When the auditor previously normalized all fields to lowercase, `crimson_Student` was lost, blocking record creation and updates.
+    - **Logical Name**: Always lowercase (e.g. `app_candidate`). Used by OData `GET` reading queries.
+    - **Schema Name**: Preserves original mixed-case capitalization (e.g. `app_Candidate`). Used by Power Pages OData `POST` / `PATCH` requests on Lookup fields using `@odata.bind` notation (e.g., `"app_Candidate@odata.bind": "/contacts(...)"`).
+  - Power Pages gatekeeper checks the stripped property name against the `Webapi/<table_name>/fields` whitelist. When the auditor previously normalized all fields to lowercase, `app_Candidate` was lost, blocking record creation and updates.
   - The auditor now discovers, tracks, and registers **both** names simultaneously in `Webapi/<table_name>/fields`.
 - **Smart Filter & Attribute Extraction**:
   - `filter_table_attributes()`: Retains both lowercase Logical Names and mixed-case Schema Names without lossy deduplication.

@@ -6,10 +6,10 @@
     "enabled": true,
     "config": {
       "detail_fields": [
-        "crimson_application",
-        "crimson_applicantbannerid",
-        "crimson_applicationreference",
-        "crimson_bannerid"
+        "app_application",
+        "app_applicantid",
+        "app_applicationreference",
+        "app_bannerid"
       ]
     }
   },

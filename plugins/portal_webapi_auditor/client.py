@@ -428,7 +428,7 @@ class PortalWebApiAuditorClient:
             filtered.append(f_raw)
 
         # Deduplicate exact string matches while preserving both lowercase Logical Names
-        # (e.g. 'crimson_student' for GET/read) and mixed-case Schema Names (e.g. 'crimson_Student' for @odata.bind POST/PATCH).
+        # (e.g. 'app_candidate' for GET/read) and mixed-case Schema Names (e.g. 'app_Candidate' for @odata.bind POST/PATCH).
         # If an attribute has a mixed-case Schema Name, ensure its corresponding lowercase Logical Name is also included.
         result_set: set[str] = set(filtered)
         for f_raw in list(result_set):
@@ -2855,7 +2855,7 @@ class PortalWebApiAuditorClient:
         e.g. data: JSON.stringify({ "emailaddress1": email, firstname: "John", "new_score": 100 })
         or: var record = { new_name: "test" }; ... data: JSON.stringify(record)
         Preserves exact casing of property keys (such as OData @odata.bind navigation property SchemaNames
-        like "crimson_Student@odata.bind" -> "crimson_Student").
+        like "app_Candidate@odata.bind" -> "app_Candidate").
         """
         found = set()
         skip_words = {
@@ -3115,7 +3115,7 @@ class PortalWebApiAuditorClient:
             website_id = s.get("website_id", "") if s else (target_website_id or "")
 
             # Check missing fields — only from fields detected in governed calls.
-            # NOTE: Lookup Navigation Properties in @odata.bind (e.g., crimson_Student)
+            # NOTE: Lookup Navigation Properties in @odata.bind (e.g., app_Candidate)
             # are case-sensitive in Power Pages Web API and require exact SchemaName match
             # in Webapi/<table>/fields, whereas standard lowercase logical names match case-insensitively.
             missing_from_whitelist = []
