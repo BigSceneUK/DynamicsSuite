@@ -14,10 +14,10 @@ class PortalWebApiAuditorPlugin(PluginBase):
         "scan portal JS/HTML for table & field usage, drill down into calling components, "
         "and 1-click update field whitelists."
     )
-    version = "1.1.0"
-    release_date = "2026-09-08"
+    version = "1.2.0"
+    release_date = "2026-10-17"
     author = "DynamicsSuite Team"
-    released_by = "DynamicsSuite Team"
+    released_by = "BigSceneUK"
     tags = ["Security", "Power Pages", "Web API"]
     requires_graph = False
 

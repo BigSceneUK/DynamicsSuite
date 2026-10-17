@@ -25,9 +25,6 @@
   "record_transporter": {
     "enabled": true
   },
-  "solution_packager_ui": {
-    "enabled": true
-  },
   "table_inspector": {
     "enabled": true
   }

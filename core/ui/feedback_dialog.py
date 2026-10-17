@@ -32,7 +32,7 @@ def _get_system_diagnostics(ctx=None) -> str:
             env_info = ctx.org_url
 
     return (
-        f"• DynamicsSuite Core: v1.0.1\n"
+        f"• DynamicsSuite Core: v1.0.2\n"
         f"• OS: {os_info}\n"
         f"• Python: {py_ver}\n"
         f"• Environment Host: {env_info}"

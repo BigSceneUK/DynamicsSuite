@@ -95,6 +95,7 @@ class PortalWebApiAuditorClient:
         self.last_errors: list[str] = []
         self._entity_set_cache: dict[str, str] = dict(COMMON_ENTITY_SET_MAP)
         self._table_attributes_cache: dict[str, list[str]] = {}
+        self._table_lookup_schema_map: dict[str, dict[str, str]] = {}
         self._form_fields_cache: dict[str, list[str]] = {}
         self._form_fields_by_name_cache: dict[tuple[str, str], list[str]] = {}
         self._portal_mgmt_app_id: Optional[str] = None
@@ -105,6 +106,7 @@ class PortalWebApiAuditorClient:
     def clear_all_caches(self) -> None:
         """Clear all internal in-memory caches to guarantee 100% fresh data on re-scans."""
         self._table_attributes_cache.clear()
+        self._table_lookup_schema_map.clear()
         self._form_fields_cache.clear()
         self._form_fields_by_name_cache.clear()
         self._entity_set_cache = dict(COMMON_ENTITY_SET_MAP)
@@ -401,10 +403,11 @@ class PortalWebApiAuditorClient:
             "entityformcontrol_entityformview_entityid", "entityformview_entityid",
         }
 
-        all_set = set(f.lower() for f in attrs if f)
+        all_set = set(f.strip().lower() for f in attrs if f)
         filtered = []
         for f in attrs:
-            fl = f.strip().lower()
+            f_raw = f.strip()
+            fl = f_raw.lower()
             if not fl or fl == "*":
                 continue
             if PortalWebApiAuditorClient._is_guid_or_hex_fragment(fl):
@@ -422,8 +425,17 @@ class PortalWebApiAuditorClient:
                 if fl in ("createdbyname", "modifiedbyname", "createdonbehalfbyname", "modifiedonbehalfbyname",
                           "owningbusinessunitname", "communityname", "deliveryprioritycodename", "slaname"):
                     continue
-            filtered.append(fl)
-        return sorted(list(set(filtered)))
+            filtered.append(f_raw)
+
+        # Deduplicate exact string matches while preserving both lowercase Logical Names
+        # (e.g. 'crimson_student' for GET/read) and mixed-case Schema Names (e.g. 'crimson_Student' for @odata.bind POST/PATCH).
+        # If an attribute has a mixed-case Schema Name, ensure its corresponding lowercase Logical Name is also included.
+        result_set: set[str] = set(filtered)
+        for f_raw in list(result_set):
+            fl = f_raw.lower()
+            if f_raw != fl:
+                result_set.add(fl)
+        return sorted(result_set, key=lambda x: (x.lower(), x))
 
     def get_table_attributes(self, table_name: str) -> list[str]:
         """
@@ -431,18 +443,22 @@ class PortalWebApiAuditorClient:
         Applies smart filtering to exclude internal system plumbing (Exchange sync,
         workflow engine state, activity parties) and virtual display names (*name, *yominame)
         so that generated Web API whitelists remain clean, performant, and secure.
+        Preserves both lowercase Logical Names (for GET / $select queries) and
+        mixed-case Schema Names (for @odata.bind Lookup POST / PATCH requests).
         """
         clean_tbl = table_name.strip().lower()
         if clean_tbl in self._table_attributes_cache:
             return self._table_attributes_cache[clean_tbl]
 
         attrs: set[str] = {f"{clean_tbl}id", "createdon", "modifiedon", "statecode", "statuscode", "ownerid"}
+        lookup_schemas: dict[str, str] = {}
         try:
-            url = f"EntityDefinitions(LogicalName='{clean_tbl}')/Attributes?$select=LogicalName,AttributeType,AttributeOf,IsValidForRead"
+            url = f"EntityDefinitions(LogicalName='{clean_tbl}')/Attributes?$select=LogicalName,SchemaName,AttributeType,AttributeOf,IsValidForRead"
             rows = self._fetch_all_pages(url, max_pages=10)
             if rows:
                 for r in rows:
                     l_name = (r.get("LogicalName") or "").lower()
+                    s_name = (r.get("SchemaName") or "").strip()
                     attr_type = (r.get("AttributeType") or "").lower()
                     attr_of = (r.get("AttributeOf") or "").lower()
 
@@ -459,15 +475,25 @@ class PortalWebApiAuditorClient:
 
                     attrs.add(l_name)
 
-                    # For lookups, include _<name>_value
+                    # For lookups, include _<name>_value AND SchemaName (required for @odata.bind)
                     if ("lookup" in attr_type or "customer" in attr_type or "owner" in attr_type):
                         attrs.add(f"_{l_name}_value")
+                        if s_name:
+                            attrs.add(s_name)
+                            if s_name != l_name:
+                                lookup_schemas[l_name] = s_name
         except Exception as exc:
             logger.debug("Failed fetching attributes for %s: %s", clean_tbl, exc)
 
+        if lookup_schemas:
+            self._table_lookup_schema_map[clean_tbl] = lookup_schemas
+            resolved_key = self.resolve_entity_name(clean_tbl)
+            if resolved_key:
+                self._table_lookup_schema_map[resolved_key] = lookup_schemas
+
         # Apply smart filter to clean out system plumbing, internal sync, and virtual display names
         attr_list = self.filter_table_attributes(list(attrs))
-        if f"{clean_tbl}id" not in attr_list:
+        if f"{clean_tbl}id" not in [a.lower() for a in attr_list]:
             attr_list.insert(0, f"{clean_tbl}id")
 
         self._table_attributes_cache[clean_tbl] = attr_list
@@ -489,9 +515,9 @@ class PortalWebApiAuditorClient:
             }
         """
         if isinstance(fields, str):
-            f_list = [f.strip().lower() for f in fields.split(",") if f.strip()]
+            f_list = [f.strip() for f in fields.split(",") if f.strip()]
         else:
-            f_list = [f.strip().lower() for f in fields if f and f.strip()]
+            f_list = [f.strip() for f in fields if f and f.strip()]
 
         clean_tbl = self.resolve_entity_name(table_name).strip().lower()
         tbl_attrs = self.get_table_attributes(clean_tbl)
@@ -507,21 +533,22 @@ class PortalWebApiAuditorClient:
         valid_fields: list[str] = []
         invalid_fields: list[str] = []
 
-        for f in f_list:
-            if f in valid_set:
-                valid_fields.append(f)
+        for f_raw in f_list:
+            fl = f_raw.lower()
+            if fl in valid_set:
+                valid_fields.append(f_raw)
             # Also allow lookup navigation format: _<lookup>_value if <lookup> exists in valid_set
-            elif f.startswith("_") and f.endswith("_value") and f[1:-6] in valid_set:
-                valid_fields.append(f)
+            elif fl.startswith("_") and fl.endswith("_value") and fl[1:-6] in valid_set:
+                valid_fields.append(f_raw)
             # Or <lookup> if _<lookup>_value is in valid_set
-            elif f"_{f}_value" in valid_set:
-                valid_fields.append(f)
+            elif f"_{fl}_value" in valid_set:
+                valid_fields.append(f_raw)
             else:
-                invalid_fields.append(f)
+                invalid_fields.append(f_raw)
 
         return {
-            "valid": sorted(list(set(valid_fields))),
-            "invalid": sorted(list(set(invalid_fields))),
+            "valid": sorted(list(set(valid_fields)), key=lambda x: (x.lower(), x)),
+            "invalid": sorted(list(set(invalid_fields)), key=lambda x: (x.lower(), x)),
             "all_table_attributes": sorted(list(valid_set)),
             "is_all_valid": len(invalid_fields) == 0,
             "table_name": clean_tbl,
@@ -708,7 +735,7 @@ class PortalWebApiAuditorClient:
                     item["fields_raw"] = raw_val
                     item["fields_setting_id"] = rec_id
 
-                cols = [c.strip().lower() for c in raw_val.split(",") if c.strip()]
+                cols = [c.strip() for c in raw_val.split(",") if c.strip()]
                 existing_cols = set(item["fields_list"])
                 for c in cols:
                     if c not in existing_cols:
@@ -844,6 +871,14 @@ class PortalWebApiAuditorClient:
         logger.debug("Pre-indexed %d query helper functions: %s", len(query_func_registry), list(query_func_registry.keys()))
         logger.debug("Discovered %d custom Web API wrappers: %s", len(discovered_wrappers), sorted(list(discovered_wrappers)))
 
+        # Exclude common English stop words and generic CRM system attributes from fuzzy matching
+        common_stop_words = {
+            "to", "from", "in", "on", "by", "is", "as", "at", "or", "an", "do", "no", "so",
+            "up", "me", "my", "we", "he", "if", "it", "all", "get", "set", "for", "not",
+            "out", "new", "top", "end", "run", "key", "url", "raw", "tag", "tab", "row",
+            "statecode", "statuscode", "createdon", "modifiedon", "ownerid", "versionnumber",
+        }
+
         for block in all_code_blocks:
             rec_id = block["rec_id"]
             rec_name = block["rec_name"]
@@ -885,113 +920,107 @@ class PortalWebApiAuditorClient:
                     parsed_tables_in_comp.add(hit["table_name"])
                     logger.debug("  [WEBAPI HIT] %s in %s '%s': fields=%s", hit['table_name'], comp_type, rec_name, hit['fields'])
 
+            # B. Extract FetchXML queries (<entity name="..."> <link-entity name="...">)
+            fx_hits = self._extract_fetchxml_usage(code_text, allowed_tables=known_tbl_set)
+            for fx in fx_hits:
+                fx.update({
+                    "component_type": comp_type,
+                    "component_name": rec_name,
+                    "component_id": rec_id,
+                    "table_source": table,
+                    "field_source": col,
+                    "website_id": web_id or website_id or "",
+                })
+                occurrences.append(fx)
+                parsed_tables_in_comp.add(fx["table_name"])
 
-                    # B. Extract FetchXML queries (<entity name="..."> <link-entity name="...">)
-                    fx_hits = self._extract_fetchxml_usage(code_text, allowed_tables=known_tbl_set)
-                    for fx in fx_hits:
-                        fx.update({
-                            "component_type": comp_type,
-                            "component_name": rec_name,
-                            "component_id": rec_id,
-                            "table_source": table,
-                            "field_source": col,
-                            "website_id": web_id or website_id or "",
-                        })
-                        occurrences.append(fx)
-                        parsed_tables_in_comp.add(fx["table_name"])
+            # C. Extract Liquid entity lookups
+            lq_hits = self._extract_liquid_entity_usage(code_text, allowed_tables=known_tbl_set)
+            for lq in lq_hits:
+                lq.update({
+                    "component_type": comp_type,
+                    "component_name": rec_name,
+                    "component_id": rec_id,
+                    "table_source": table,
+                    "field_source": col,
+                    "website_id": web_id or website_id or "",
+                })
+                occurrences.append(lq)
+                parsed_tables_in_comp.add(lq["table_name"])
 
-                    # C. Extract Liquid entity lookups
-                    lq_hits = self._extract_liquid_entity_usage(code_text, allowed_tables=known_tbl_set)
-                    for lq in lq_hits:
-                        lq.update({
-                            "component_type": comp_type,
-                            "component_name": rec_name,
-                            "component_id": rec_id,
-                            "table_source": table,
-                            "field_source": col,
-                            "website_id": web_id or website_id or "",
-                        })
-                        occurrences.append(lq)
-                        parsed_tables_in_comp.add(lq["table_name"])
+            # C2. Extract Liquid Portal tag usages (entityview, entityform, recordview)
+            lt_hits = self._extract_liquid_tag_usage(code_text, allowed_tables=known_tbl_set)
+            for lt in lt_hits:
+                lt.update({
+                    "component_type": comp_type,
+                    "component_name": rec_name,
+                    "component_id": rec_id,
+                    "table_source": table,
+                    "field_source": col,
+                    "website_id": web_id or website_id or "",
+                })
+                occurrences.append(lt)
+                parsed_tables_in_comp.add(lt["table_name"])
 
-                    # C2. Extract Liquid Portal tag usages (entityview, entityform, recordview)
-                    lt_hits = self._extract_liquid_tag_usage(code_text, allowed_tables=known_tbl_set)
-                    for lt in lt_hits:
-                        lt.update({
-                            "component_type": comp_type,
-                            "component_name": rec_name,
-                            "component_id": rec_id,
-                            "table_source": table,
-                            "field_source": col,
-                            "website_id": web_id or website_id or "",
-                        })
-                        occurrences.append(lt)
-                        parsed_tables_in_comp.add(lt["table_name"])
+            # D. Fallback: Check for mentions of known Web API tables in client JS/HTML
+            # Strip FetchXML blocks from the code so XML attributes like uitype="contact" don't trigger false positives
+            code_for_fuzzy = re.sub(r'<fetch\b.*?</fetch>', '', code_text, flags=re.DOTALL | re.IGNORECASE)
+            code_for_fuzzy = re.sub(r'\{%\s*fetchxml\b.*?\{%\s*endfetchxml\s*%\}', '', code_for_fuzzy, flags=re.DOTALL | re.IGNORECASE)
 
-                    # D. Fallback: Check for mentions of known Web API tables in client JS/HTML
-                    # Strip FetchXML blocks from the code so XML attributes like uitype="contact" don't trigger false positives
-                    code_for_fuzzy = re.sub(r'<fetch\b.*?</fetch>', '', code_text, flags=re.DOTALL | re.IGNORECASE)
-                    code_for_fuzzy = re.sub(r'\{%\s*fetchxml\b.*?\{%\s*endfetchxml\s*%\}', '', code_for_fuzzy, flags=re.DOTALL | re.IGNORECASE)
+            if known_tbl_set and code_for_fuzzy.strip():
+                lines = code_for_fuzzy.splitlines()
+                for tbl in known_tbl_set:
+                    # Skip if this component already had an explicit OData/FetchXML query parsed
+                    if tbl in parsed_tables_in_comp:
+                        continue
 
-                    # Exclude common English stop words and generic CRM system attributes from fuzzy matching
-                    common_stop_words = {
-                        "to", "from", "in", "on", "by", "is", "as", "at", "or", "an", "do", "no", "so",
-                        "up", "me", "my", "we", "he", "if", "it", "all", "get", "set", "for", "not",
-                        "out", "new", "top", "end", "run", "key", "url", "raw", "tag", "tab", "row",
-                        "statecode", "statuscode", "createdon", "modifiedon", "ownerid", "versionnumber",
-                    }
+                    tbl_pattern = re.compile(r'\b' + re.escape(tbl) + r'(?:s|ies)?\b', re.IGNORECASE)
+                    if tbl_pattern.search(code_for_fuzzy):
+                        tbl_valid_attrs = list(set(table_attrs_map.get(tbl, []) + (table_fields_map or {}).get(tbl, [])))
 
-                    if known_tbl_set and code_for_fuzzy.strip():
-                        lines = code_for_fuzzy.splitlines()
-                        for tbl in known_tbl_set:
-                            # Skip if this component already had an explicit OData/FetchXML query parsed
-                            if tbl in parsed_tables_in_comp:
-                                continue
+                        for line_idx, line in enumerate(lines, start=1):
+                            if tbl_pattern.search(line):
+                                start_l = max(0, line_idx - 15)
+                                end_l = min(len(lines), line_idx + 20)
+                                raw_snip_block = "\n".join(lines[start_l:end_l])
 
-                            tbl_pattern = re.compile(r'\b' + re.escape(tbl) + r'(?:s|ies)?\b', re.IGNORECASE)
-                            if tbl_pattern.search(code_for_fuzzy):
-                                tbl_valid_attrs = list(set(table_attrs_map.get(tbl, []) + (table_fields_map or {}).get(tbl, [])))
+                                matched_fields = set()
+                                for attr in tbl_valid_attrs:
+                                    attr_low = attr.lower()
+                                    if (
+                                        attr_low not in common_stop_words
+                                        and ("_" in attr_low or len(attr_low) >= 4)
+                                    ):
+                                        for m_attr in re.finditer(r'\b(' + re.escape(attr) + r')\b', raw_snip_block, re.IGNORECASE):
+                                            matched_fields.add(m_attr.group(1))
 
-                                for line_idx, line in enumerate(lines, start=1):
-                                    if tbl_pattern.search(line):
-                                        start_l = max(0, line_idx - 15)
-                                        end_l = min(len(lines), line_idx + 20)
-                                        snip_block = "\n".join(lines[start_l:end_l]).lower()
+                                # Fallback: scan full component for any configured fields
+                                if not matched_fields:
+                                    for attr in tbl_valid_attrs:
+                                        attr_low = attr.lower()
+                                        if attr_low not in common_stop_words:
+                                            for m_attr in re.finditer(r'\b(' + re.escape(attr) + r')\b', code_for_fuzzy, re.IGNORECASE):
+                                                matched_fields.add(m_attr.group(1))
 
-                                        matched_fields = set()
-                                        for attr in tbl_valid_attrs:
-                                            if (
-                                                attr not in common_stop_words
-                                                and ("_" in attr or len(attr) >= 4)
-                                                and re.search(r'\b' + re.escape(attr) + r'\b', snip_block)
-                                            ):
-                                                matched_fields.add(attr)
+                                is_client_js = any(x in col.lower() for x in ("customjavascript", "registerstartupscript", "registercustomjavascript")) or "web file" in comp_type.lower() or "script" in comp_type.lower()
+                                ep_label = f"Client Script Reference to {tbl}" if is_client_js else f"Portal Template / Code Reference to {tbl}"
+                                comp_label = f"{comp_type} Script" if is_client_js and "script" not in comp_type.lower() else comp_type
 
-                                        # Fallback: scan full component for any configured fields
-                                        if not matched_fields:
-                                            for attr in tbl_valid_attrs:
-                                                if attr not in common_stop_words and re.search(r'\b' + re.escape(attr) + r'\b', code_for_fuzzy.lower()):
-                                                    matched_fields.add(attr)
-
-                                        is_client_js = any(x in col.lower() for x in ("customjavascript", "registerstartupscript", "registercustomjavascript")) or "web file" in comp_type.lower() or "script" in comp_type.lower()
-                                        ep_label = f"Client Script Reference to {tbl}" if is_client_js else f"Portal Template / Code Reference to {tbl}"
-                                        comp_label = f"{comp_type} Script" if is_client_js and "script" not in comp_type.lower() else comp_type
-
-                                        occurrences.append({
-                                            "raw_endpoint": ep_label,
-                                            "table_name": tbl,
-                                            "table_raw": tbl,
-                                            "fields": sorted(list(f for f in matched_fields if f and f != "*")),
-                                            "line_number": line_idx,
-                                            "context_snippet": "\n".join(lines[max(0, line_idx - 2):min(len(lines), line_idx + 3)]),
-                                            "component_type": comp_label,
-                                            "component_name": rec_name,
-                                            "component_id": rec_id,
-                                            "table_source": table,
-                                            "field_source": col,
-                                            "website_id": web_id or website_id or "",
-                                        })
-                                        break  # Record one occurrence per component per table
+                                occurrences.append({
+                                    "raw_endpoint": ep_label,
+                                    "table_name": tbl,
+                                    "table_raw": tbl,
+                                    "fields": sorted(list(f for f in matched_fields if f and f != "*"), key=lambda x: (x.lower(), x)),
+                                    "line_number": line_idx,
+                                    "context_snippet": "\n".join(lines[max(0, line_idx - 2):min(len(lines), line_idx + 3)]),
+                                    "component_type": comp_label,
+                                    "component_name": rec_name,
+                                    "component_id": rec_id,
+                                    "table_source": table,
+                                    "field_source": col,
+                                    "website_id": web_id or website_id or "",
+                                })
+                                break  # Record one occurrence per component per table
 
         # 2. Scan Web Files (.js / .jsx / .ts attachments in annotation table)
         for schema in ["adx", "mspp"]:
@@ -1062,7 +1091,6 @@ class PortalWebApiAuditorClient:
 
                 # Also match known Web API table attributes in Web File JS
                 if known_tbl_set:
-                    lower_js = decoded_js.lower()
                     lines = decoded_js.splitlines()
                     for tbl in known_tbl_set:
                         if tbl in parsed_wf_tables:
@@ -1074,29 +1102,32 @@ class PortalWebApiAuditorClient:
                                 if tbl_pattern.search(line):
                                     start_l = max(0, line_idx - 15)
                                     end_l = min(len(lines), line_idx + 20)
-                                    snip_block = "\n".join(lines[start_l:end_l]).lower()
+                                    raw_snip_block = "\n".join(lines[start_l:end_l])
 
                                     matched_fields = set()
                                     for attr in tbl_valid_attrs:
+                                        attr_low = attr.lower()
                                         if (
-                                            attr not in common_stop_words
-                                            and ("_" in attr or len(attr) >= 4)
-                                            and re.search(r'\b' + re.escape(attr) + r'\b', snip_block)
+                                            attr_low not in common_stop_words
+                                            and ("_" in attr_low or len(attr_low) >= 4)
                                         ):
-                                            matched_fields.add(attr)
+                                            for m_attr in re.finditer(r'\b(' + re.escape(attr) + r')\b', raw_snip_block, re.IGNORECASE):
+                                                matched_fields.add(m_attr.group(1))
 
                                     # Fallback: scan whole file
                                     if not matched_fields:
                                         for attr in tbl_valid_attrs:
-                                            if attr not in common_stop_words and re.search(r'\b' + re.escape(attr) + r'\b', decoded_js.lower()):
-                                                matched_fields.add(attr)
+                                            attr_low = attr.lower()
+                                            if attr_low not in common_stop_words:
+                                                for m_attr in re.finditer(r'\b(' + re.escape(attr) + r')\b', decoded_js, re.IGNORECASE):
+                                                    matched_fields.add(m_attr.group(1))
 
-                                    logger.debug("  [WEB FILE HIT] %s in '%s' (fn='%s'): fields=%s", tbl, w_name, fn, sorted(list(matched_fields)))
+                                    logger.debug("  [WEB FILE HIT] %s in '%s' (fn='%s'): fields=%s", tbl, w_name, fn, sorted(list(matched_fields), key=lambda x: (x.lower(), x)))
                                     occurrences.append({
                                         "raw_endpoint": f"Web File JS Reference to {tbl}",
                                         "table_name": tbl,
                                         "table_raw": tbl,
-                                        "fields": sorted(list(f for f in matched_fields if f and f != "*")),
+                                        "fields": sorted(list(f for f in matched_fields if f and f != "*"), key=lambda x: (x.lower(), x)),
                                         "line_number": line_idx,
                                         "context_snippet": "\n".join(lines[max(0, line_idx - 2):min(len(lines), line_idx + 3)]),
                                         "component_type": "Web File (.js attachment)",
@@ -1201,7 +1232,8 @@ class PortalWebApiAuditorClient:
         if not fields:
             return None
 
-        clean_fields = [f.strip().lower() for f in fields if f and f != "*"]
+        raw_clean_fields = [f.strip() for f in fields if f and f.strip() != "*"]
+        clean_fields = [f.lower() for f in raw_clean_fields]
         if not clean_fields:
             return None
 
@@ -1209,7 +1241,7 @@ class PortalWebApiAuditorClient:
         lower_tbl = table_name.lower()
 
         # 1. Validation Schemes (Regex / Validation rules)
-        regex_attrs = [f for f in clean_fields if any(k in f for k in (
+        regex_attrs = [f for f in raw_clean_fields if any(k in f.lower() for k in (
             "validationregex", "regexvalidationmessage", "regexerrormessage",
             "validationmessage", "subtestsmin", "subtestsmax", "scoreinterval",
             "applyportalvalidation", "maxscore", "postcoderegex"
@@ -1242,8 +1274,8 @@ class PortalWebApiAuditorClient:
             "_stageid_value", "_processid_value",
         }
         lookup_attrs = [
-            f for f in clean_fields
-            if f.startswith("_") and f.endswith("_value") and f not in system_lookup_skips
+            f for f in raw_clean_fields
+            if f.lower().startswith("_") and f.lower().endswith("_value") and f.lower() not in system_lookup_skips
         ]
         if lookup_attrs and len(clean_fields) <= 10:
             parents = []
@@ -1269,7 +1301,7 @@ class PortalWebApiAuditorClient:
             })
 
         # 3. Portal Filtered Option Catalogs / Reason Codes
-        portal_filter_attrs = [f for f in clean_fields if any(k in f for k in (
+        portal_filter_attrs = [f for f in raw_clean_fields if any(k in f.lower() for k in (
             "showonportal", "showinportal", "visibleinportal", "displayonportal", "portaldisplay",
             "portalvisible", "portalvisibility", "portalactive"
         ))]
@@ -1291,7 +1323,7 @@ class PortalWebApiAuditorClient:
             })
 
         # 4. Portal Step / Navigation Configuration
-        step_attrs = [f for f in clean_fields if any(k in f for k in (
+        step_attrs = [f for f in raw_clean_fields if any(k in f.lower() for k in (
             "editguid", "createguid", "stepid", "portalshowchoicelookup", "portalstep", "formstep"
         ))]
         if step_attrs:
@@ -1311,7 +1343,7 @@ class PortalWebApiAuditorClient:
             })
 
         # 5. Geographic / Address Verification Catalog
-        geo_attrs = [f for f in clean_fields if any(k in f for k in (
+        geo_attrs = [f for f in raw_clean_fields if any(k in f.lower() for k in (
             "statename", "postcoderegex", "postcodemandatory", "staterequired", "countryname", "zipcode", "postalcode"
         )) or any(k in lower_tbl for k in ("country", "state", "postcode", "address", "zip"))]
         if geo_attrs and ("country" in lower_tbl or "state" in lower_tbl or "postcode" in lower_tbl or "address" in lower_tbl):
@@ -1333,7 +1365,7 @@ class PortalWebApiAuditorClient:
         # 6. Application / Portal Settings & Configuration Store (Key-Value Parameters)
         # e.g. app_settings, app_config with fields like value, settingvalue, config_value
         is_setting_tbl = any(k in lower_tbl for k in ("setting", "config", "parameter", "preference", "constant", "featureflag"))
-        setting_val_attrs = [f for f in clean_fields if any(k in f for k in ("value", "val", "setting", "config", "param", "key", "enabled")) and f != "statecode"]
+        setting_val_attrs = [f for f in raw_clean_fields if any(k in f.lower() for k in ("value", "val", "setting", "config", "param", "key", "enabled")) and f.lower() != "statecode"]
         if is_setting_tbl or (setting_val_attrs and any("setting" in f or "config" in f for f in clean_fields)):
             matched_roles.append({
                 "is_catalog": True,
@@ -1344,7 +1376,7 @@ class PortalWebApiAuditorClient:
                     f"Table functions as a centralized key-value settings or feature flags repository "
                     f"queried by portal scripts to read runtime operational parameters ({', '.join(setting_val_attrs) if setting_val_attrs else 'values'})."
                 ),
-                "key_attributes": setting_val_attrs or clean_fields,
+                "key_attributes": setting_val_attrs or raw_clean_fields,
                 "safety_advice": (
                     f"Do NOT disable Web API for '{table_name}'. Portal scripts query this table to read "
                     f"feature toggles, validation thresholds, or runtime configuration."
@@ -1352,10 +1384,10 @@ class PortalWebApiAuditorClient:
             })
 
         # 7. Entity Policy & Feature Toggles (e.g. dynamic business toggles, eligibility flags)
-        toggle_attrs = [f for f in clean_fields if any(k in f for k in (
+        toggle_attrs = [f for f in raw_clean_fields if any(k in f.lower() for k in (
             "allow", "allowed", "enable", "enabled",
             "eligible", "eligibility", "optin", "optout", "permitted", "featureenabled", "isactive"
-        )) and f not in ("statecode", "statuscode")]
+        )) and f.lower() not in ("statecode", "statuscode")]
         if toggle_attrs:
             matched_roles.append({
                 "is_catalog": True,
@@ -1374,7 +1406,7 @@ class PortalWebApiAuditorClient:
             })
 
         # 8. Calendar, Session & Policy Quota Catalog (e.g. calendaryear, academicyear)
-        calendar_attrs = [f for f in clean_fields if any(k in f for k in (
+        calendar_attrs = [f for f in raw_clean_fields if any(k in f.lower() for k in (
             "startdate", "enddate", "numericyear", "academicyear", "sessionyear",
             "maxnumber", "quota", "allowance", "semester", "term", "fiscalyear"
         ))]
@@ -1389,7 +1421,7 @@ class PortalWebApiAuditorClient:
                     f"Table defines calendar date boundaries and policy allowances "
                     f"({', '.join(calendar_attrs) if calendar_attrs else 'session parameters'}) for portal forms."
                 ),
-                "key_attributes": calendar_attrs or clean_fields,
+                "key_attributes": calendar_attrs or raw_clean_fields,
                 "safety_advice": (
                     f"Do NOT disable Web API for '{table_name}'. Portal scripts query this table to validate "
                     f"dates and enforce policy quotas."
@@ -1409,7 +1441,7 @@ class PortalWebApiAuditorClient:
                     f"In Power Pages, reference catalogs and lookup tables are queried dynamically by generic client helpers, "
                     f"portal framework lookups, or PCF components rather than static hardcoded scripts."
                 ),
-                "key_attributes": clean_fields,
+                "key_attributes": raw_clean_fields,
                 "safety_advice": (
                     f"Preserve this explicit whitelist. Web API site settings for reference catalogs ensure portal lookups and "
                     f"dynamic queries function without exposing unauthorized columns."
@@ -1737,19 +1769,21 @@ class PortalWebApiAuditorClient:
                                     tbl_valid_attrs = self.get_table_attributes(tbl)
                                     fields_hit = set()
                                     for a in tbl_valid_attrs:
-                                        if a and ("_" in a or len(a) >= 4) and re.search(r'\b' + re.escape(a) + r'\b', lower_js):
-                                            fields_hit.add(a)
+                                        if a and ("_" in a or len(a) >= 4):
+                                            for m_a in re.finditer(r'\b(' + re.escape(a) + r')\b', custom_js, re.IGNORECASE):
+                                                fields_hit.add(m_a.group(1))
 
+                                    sorted_hit = sorted(list(fields_hit), key=lambda x: (x.lower(), x))
                                     result[tbl].append({
                                         "raw_endpoint": f"{comp_kind} Custom Script Reference: {fname}",
                                         "table_name": tbl,
                                         "table_raw": tbl,
-                                        "fields": sorted(list(fields_hit)),
+                                        "fields": sorted_hit,
                                         "line_number": 1,
                                         "context_snippet": (
                                             f"// {comp_kind}: {fname} (Model-driven form: '{mda_form}', target table: {fent})\n"
                                             f"// Custom JavaScript on this portal step interacts with {tbl}\n"
-                                            f"// Detected fields: {', '.join(sorted(list(fields_hit))) if fields_hit else 'None'}"
+                                            f"// Detected fields: {', '.join(sorted_hit) if sorted_hit else 'None'}"
                                         ),
                                         "component_type": f"{comp_kind} Script",
                                         "component_name": fname,
@@ -1772,7 +1806,7 @@ class PortalWebApiAuditorClient:
                         "raw_endpoint": f"Dynamic UI Catalog ({cat_role['role_title']})",
                         "table_name": tbl,
                         "table_raw": tbl,
-                        "fields": sorted(list(set(clean_cfg_flds))),
+                        "fields": sorted(list(set(clean_cfg_flds)), key=lambda x: (x.lower(), x)),
                         "line_number": 1,
                         "context_snippet": (
                             f"// Table: {tbl}\n"
@@ -2464,7 +2498,7 @@ class PortalWebApiAuditorClient:
                     "raw_endpoint": endpoint_name,
                     "table_name": logical_table,
                     "table_raw": table_raw,
-                    "fields": sorted(list(f for f in fields_found if f and f != "*")),
+                    "fields": sorted(list(f for f in fields_found if f and f != "*"), key=lambda x: (x.lower(), x)),
                     "is_unprojected": is_unproj,
                     "unprojected_reason": unproj_reason,
                     "line_number": line_idx,
@@ -2539,7 +2573,7 @@ class PortalWebApiAuditorClient:
                     "raw_endpoint": f"/_api/{table_raw} (HTTP client call)",
                     "table_name": logical_table,
                     "table_raw": table_raw,
-                    "fields": sorted(list(f for f in fields_found if f and f != "*")),
+                    "fields": sorted(list(f for f in fields_found if f and f != "*"), key=lambda x: (x.lower(), x)),
                     "is_unprojected": is_unproj,
                     "unprojected_reason": unproj_reason,
                     "line_number": line_idx,
@@ -2594,7 +2628,7 @@ class PortalWebApiAuditorClient:
                     "raw_endpoint": match.group(0) + "(...)",
                     "table_name": logical_table,
                     "table_raw": table_raw,
-                    "fields": sorted(list(f for f in fields_found if f and f != "*")),
+                    "fields": sorted(list(f for f in fields_found if f and f != "*"), key=lambda x: (x.lower(), x)),
                     "is_unprojected": is_unproj,
                     "unprojected_reason": unproj_reason,
                     "line_number": line_idx,
@@ -2651,7 +2685,7 @@ class PortalWebApiAuditorClient:
                                     "raw_endpoint": f"{fn_name}({called_fn} -> {resolved['raw_endpoint']})",
                                     "table_name": logical_table,
                                     "table_raw": table_raw,
-                                    "fields": sorted(list(f for f in fields_found if f and f != "*")),
+                                    "fields": sorted(list(f for f in fields_found if f and f != "*"), key=lambda x: (x.lower(), x)),
                                     "is_unprojected": False,
                                     "unprojected_reason": "",
                                     "line_number": line_idx,
@@ -2712,7 +2746,7 @@ class PortalWebApiAuditorClient:
                         "raw_endpoint": f"{fn_name}({table_raw}{query_part})",
                         "table_name": logical_table,
                         "table_raw": table_raw,
-                        "fields": sorted(list(f for f in fields_found if f and f != "*")),
+                        "fields": sorted(list(f for f in fields_found if f and f != "*"), key=lambda x: (x.lower(), x)),
                         "is_unprojected": is_unproj,
                         "unprojected_reason": unproj_reason,
                         "line_number": line_idx,
@@ -2759,7 +2793,7 @@ class PortalWebApiAuditorClient:
                         "raw_endpoint": dj.group(0) + f" (resolved: {resolved_table})",
                         "table_name": logical_table,
                         "table_raw": resolved_table,
-                        "fields": sorted(list(f for f in fields_found if f and f != "*")),
+                        "fields": sorted(list(f for f in fields_found if f and f != "*"), key=lambda x: (x.lower(), x)),
                         "line_number": line_idx,
                         "context_snippet": "\n".join(lines[max(0, line_idx - 2):min(len(lines), line_idx + 3)]),
                     })
@@ -2807,7 +2841,7 @@ class PortalWebApiAuditorClient:
                         "raw_endpoint": f"/_api/ + {table_raw}",
                         "table_name": logical_table,
                         "table_raw": table_raw,
-                        "fields": sorted(list(f for f in fields_found if f and f != "*")),
+                        "fields": sorted(list(f for f in fields_found if f and f != "*"), key=lambda x: (x.lower(), x)),
                         "line_number": line_idx,
                         "context_snippet": "\n".join(lines[max(0, line_idx - 2):min(len(lines), line_idx + 3)]),
                     })
@@ -2820,6 +2854,8 @@ class PortalWebApiAuditorClient:
         Extract property keys from JSON payloads passed to Web API AJAX calls
         e.g. data: JSON.stringify({ "emailaddress1": email, firstname: "John", "new_score": 100 })
         or: var record = { new_name: "test" }; ... data: JSON.stringify(record)
+        Preserves exact casing of property keys (such as OData @odata.bind navigation property SchemaNames
+        like "crimson_Student@odata.bind" -> "crimson_Student").
         """
         found = set()
         skip_words = {
@@ -2835,32 +2871,39 @@ class PortalWebApiAuditorClient:
             "entityformcontrol_entityformview_entityid", "entityformview_entityid",
         }
 
-        # 1. Look for direct object literal in JSON.stringify(...)
+        # 1. Look for direct object literals in all JSON.stringify(...) calls in code_block
         # Handle nested template literals `${...}` or Liquid tags `{{...}}` using balanced parentheses
-        idx = code_block.find("JSON.stringify")
-        if idx != -1:
+        search_pos = 0
+        while True:
+            idx = code_block.find("JSON.stringify", search_pos)
+            if idx == -1:
+                break
             start_paren = code_block.find("(", idx)
-            if start_paren != -1:
-                depth = 0
-                end_paren = -1
-                for i in range(start_paren, len(code_block)):
-                    if code_block[i] == "(":
-                        depth += 1
-                    elif code_block[i] == ")":
-                        depth -= 1
-                        if depth == 0:
-                            end_paren = i
-                            break
-                stringify_content = code_block[start_paren + 1:end_paren] if end_paren != -1 else code_block[start_paren + 1:]
-                key_matches = re.findall(r"""["']?(?:@[a-zA-Z0-9_.]+|([a-zA-Z0-9_]{2,50})(?:@[a-zA-Z0-9_.]+)?)["']?\s*:""", stringify_content)
-                for k in key_matches:
-                    k_clean = k.strip().lower()
-                    if k_clean and k_clean not in skip_words and not k_clean.isdigit() and not self._is_guid_or_hex_fragment(k_clean):
-                        found.add(k_clean)
+            if start_paren == -1:
+                break
+            depth = 0
+            end_paren = -1
+            for i in range(start_paren, len(code_block)):
+                if code_block[i] == "(":
+                    depth += 1
+                elif code_block[i] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        end_paren = i
+                        break
+            stringify_content = code_block[start_paren + 1:end_paren] if end_paren != -1 else code_block[start_paren + 1:]
+            key_matches = re.findall(r"""["']?(?:@[a-zA-Z0-9_.]+|([a-zA-Z0-9_]{2,50})(?:@[a-zA-Z0-9_.]+)?)["']?\s*:""", stringify_content)
+            for k in key_matches:
+                k_raw = k.strip()
+                k_low = k_raw.lower()
+                if k_raw and k_low not in skip_words and not k_low.isdigit() and not self._is_guid_or_hex_fragment(k_low):
+                    found.add(k_raw)
+                    if k_raw != k_low:
+                        found.add(k_low)
+            search_pos = (end_paren + 1) if end_paren != -1 else (start_paren + 1)
 
         # 2. Look for variable passed to JSON.stringify(recordVar)
-        json_var_match = re.search(r"JSON\.stringify\s*\(\s*([a-zA-Z0-9_]+)\s*\)", code_block)
-        if json_var_match:
+        for json_var_match in re.finditer(r"JSON\.stringify\s*\(\s*([a-zA-Z0-9_]+)\s*\)", code_block):
             var_name = json_var_match.group(1)
             # Find definition: var <var_name> = { ... }
             # Use balanced braces to support Liquid tags {{...}} and template literals ${...} inside object properties
@@ -2880,9 +2923,12 @@ class PortalWebApiAuditorClient:
                 var_content = code_block[start_b + 1:end_b] if end_b != -1 else code_block[start_b + 1:]
                 key_matches = re.findall(r"""["']?(?:@[a-zA-Z0-9_.]+|([a-zA-Z0-9_]{2,50})(?:@[a-zA-Z0-9_.]+)?)["']?\s*:""", var_content)
                 for k in key_matches:
-                    k_clean = k.strip().lower()
-                    if k_clean and k_clean not in skip_words and not k_clean.isdigit() and not self._is_guid_or_hex_fragment(k_clean):
-                        found.add(k_clean)
+                    k_raw = k.strip()
+                    k_low = k_raw.lower()
+                    if k_raw and k_low not in skip_words and not k_low.isdigit() and not self._is_guid_or_hex_fragment(k_low):
+                        found.add(k_raw)
+                        if k_raw != k_low:
+                            found.add(k_low)
 
             # Also look for property assignments: recordVar.prop = ... or recordVar['prop'] = ...
             prop_pattern = re.compile(
@@ -2890,9 +2936,12 @@ class PortalWebApiAuditorClient:
                 re.IGNORECASE
             )
             for m in prop_pattern.finditer(code_block):
-                p = (m.group(1) or m.group(2) or "").strip().lower()
-                if p and p not in skip_words and not p.isdigit() and not self._is_guid_or_hex_fragment(p):
-                    found.add(p)
+                p_raw = (m.group(1) or m.group(2) or "").strip()
+                p_low = p_raw.lower()
+                if p_raw and p_low not in skip_words and not p_low.isdigit() and not self._is_guid_or_hex_fragment(p_low):
+                    found.add(p_raw)
+                    if p_raw != p_low:
+                        found.add(p_low)
 
         return found
 
@@ -3049,9 +3098,9 @@ class PortalWebApiAuditorClient:
                 if tbl_attrs:
                     valid_attr_set = set(a.lower() for a in tbl_attrs)
                     valid_attr_set.add(f"{tbl}id".lower())
-                    filtered_disc = [f for f in filtered_disc if f in valid_attr_set]
+                    filtered_disc = [f for f in filtered_disc if f.lower() in valid_attr_set]
 
-            discovered_fields = sorted(list(f for f in filtered_disc if f and f != "*"))
+            discovered_fields = sorted(list(f for f in filtered_disc if f and f != "*"), key=lambda x: (x.lower(), x))
             governed_count = len(governed_occs)
             custom_count = len(custom_code_occs)
 
@@ -3065,10 +3114,17 @@ class PortalWebApiAuditorClient:
             setting_table = s.get("setting_table", default_setting_table) if s else default_setting_table
             website_id = s.get("website_id", "") if s else (target_website_id or "")
 
-            # Check missing fields — only from fields detected in governed calls
+            # Check missing fields — only from fields detected in governed calls.
+            # NOTE: Lookup Navigation Properties in @odata.bind (e.g., crimson_Student)
+            # are case-sensitive in Power Pages Web API and require exact SchemaName match
+            # in Webapi/<table>/fields, whereas standard lowercase logical names match case-insensitively.
             missing_from_whitelist = []
             if not has_wildcard and configured_fields:
-                missing_from_whitelist = [f for f in discovered_fields if f not in configured_fields]
+                configured_lower_set = {c.lower() for c in configured_fields}
+                missing_from_whitelist = [
+                    f for f in discovered_fields
+                    if (f not in configured_fields if f != f.lower() else f.lower() not in configured_lower_set)
+                ]
             elif not has_wildcard and not configured_fields and discovered_fields:
                 missing_from_whitelist = list(discovered_fields)
 
@@ -3167,16 +3223,17 @@ class PortalWebApiAuditorClient:
                     )
 
             # Recommended fields computation:
-            # Separate fields by source tier:
-            valid_existing = set(f.lower() for f in configured_fields if f and f != "*")
-            valid_discovered = set(f.lower() for f in discovered_fields if f and f != "*")
+            # Separate fields by source tier (preserving mixed-case SchemaNames where present):
+            valid_existing = set(f for f in configured_fields if f and f != "*")
+            valid_discovered = set(f for f in discovered_fields if f and f != "*")
+            existing_mixed_by_lower = {f.lower(): f for f in valid_existing if f != f.lower()}
 
             form_xml_fields = set()
             server_xml_fields = set()
             client_occ_fields = set()
 
             for occ in occurrences_by_table.get(tbl, []):
-                f_list = [f.lower() for f in occ.get("fields", []) if f and f != "*"]
+                f_list = [f for f in occ.get("fields", []) if f and f != "*"]
                 c_type = occ.get("component_type", "")
                 if occ.get("is_form_xml") or "Form XML" in c_type or c_type in ("Basic Form", "Multistep Form", "Multistep Form Step"):
                     form_xml_fields.update(f_list)
@@ -3190,14 +3247,14 @@ class PortalWebApiAuditorClient:
             if not form_xml_fields and code_occurrences:
                 direct_form_fields = self.get_table_form_fields(tbl)
                 if direct_form_fields:
-                    form_xml_fields.update(f.lower() for f in direct_form_fields if f and f != "*")
+                    form_xml_fields.update(f for f in direct_form_fields if f and f != "*")
 
             # Key attributes from architectural catalog role
             catalog_fields = set()
             if catalog_role:
                 for fld in catalog_role.get("key_attributes", []):
                     if fld and fld != "*":
-                        catalog_fields.add(fld.lower())
+                        catalog_fields.add(fld)
 
             # Tier 1: Client & Lists
             #   - Client-side JS /_api/ calls, safeAjax, PCF controls
@@ -3239,7 +3296,7 @@ class PortalWebApiAuditorClient:
                 if tbl_attrs:
                     for attr in tbl_attrs:
                         if attr and attr != "*":
-                            server_fields.add(attr.lower())
+                            server_fields.add(attr)
 
             # If unprojected /_api/ calls exist (no $select / wildcard *), add all table fields as safety net
             all_table_fields_added = False
@@ -3251,39 +3308,57 @@ class PortalWebApiAuditorClient:
                 if tbl_attrs:
                     for attr in tbl_attrs:
                         if attr and attr != "*":
-                            strict_fields.add(attr.lower())
-                            form_fields.add(attr.lower())
-                            server_fields.add(attr.lower())
+                            strict_fields.add(attr)
+                            form_fields.add(attr)
+                            server_fields.add(attr)
                     all_table_fields_added = True
 
+            # Also preserve any mixed-case SchemaNames already configured in site settings
+            # and ensure lookup SchemaNames discovered from metadata are added alongside logical names
+            table_lookup_map = self._table_lookup_schema_map.get(logical_tbl) or self._table_lookup_schema_map.get(tbl) or {}
+            for tier_set in (strict_fields, form_fields, server_fields):
+                for low_k, mixed_v in existing_mixed_by_lower.items():
+                    if any(x.lower() == low_k for x in tier_set):
+                        tier_set.add(mixed_v)
+                        tier_set.add(low_k)
+                for low_k, schema_v in table_lookup_map.items():
+                    if any(x.lower() == low_k for x in tier_set):
+                        tier_set.add(schema_v)
+                        tier_set.add(low_k)
+
             # Clean fields through filter_table_attributes to remove virtual fields and non-field noise tokens
+            # (filter_table_attributes preserves both lowercase Logical Names and mixed-case Schema Names)
             filtered_strict = set(self.filter_table_attributes(list(strict_fields)))
             filtered_form = set(self.filter_table_attributes(list(form_fields)))
             filtered_server = set(self.filter_table_attributes(list(server_fields)))
 
             # Metadata Validation Guard: Discard any token that is not a real Dataverse attribute
             if valid_attr_set:
-                filtered_strict = set(f for f in filtered_strict if f in valid_attr_set)
-                filtered_form = set(f for f in filtered_form if f in valid_attr_set)
-                filtered_server = set(f for f in filtered_server if f in valid_attr_set)
+                filtered_strict = set(f for f in filtered_strict if f.lower() in valid_attr_set)
+                filtered_form = set(f for f in filtered_form if f.lower() in valid_attr_set)
+                filtered_server = set(f for f in filtered_server if f.lower() in valid_attr_set)
 
+            pk_low = f"{tbl}id".lower()
             if filtered_strict:
-                filtered_strict.add(f"{tbl}id".lower())
-                strict_str = ",".join(sorted(filtered_strict))
+                if pk_low not in {x.lower() for x in filtered_strict}:
+                    filtered_strict.add(pk_low)
+                strict_str = ",".join(sorted(filtered_strict, key=lambda x: (x.lower(), x)))
             else:
-                strict_str = f"{tbl}id".lower()
+                strict_str = pk_low
 
             if filtered_form:
-                filtered_form.add(f"{tbl}id".lower())
-                form_str = ",".join(sorted(filtered_form))
+                if pk_low not in {x.lower() for x in filtered_form}:
+                    filtered_form.add(pk_low)
+                form_str = ",".join(sorted(filtered_form, key=lambda x: (x.lower(), x)))
             else:
-                form_str = f"{tbl}id".lower()
+                form_str = pk_low
 
             if filtered_server:
-                filtered_server.add(f"{tbl}id".lower())
-                server_str = ",".join(sorted(filtered_server))
+                if pk_low not in {x.lower() for x in filtered_server}:
+                    filtered_server.add(pk_low)
+                server_str = ",".join(sorted(filtered_server, key=lambda x: (x.lower(), x)))
             else:
-                server_str = f"{tbl}id".lower()
+                server_str = pk_low
 
             # Active recommendation based on user preference
             if suggestion_mode == "client":
@@ -3298,8 +3373,8 @@ class PortalWebApiAuditorClient:
 
             for occ in occ_list:
                 if occ.get("is_unprojected") and self._is_webapi_governed(occ):
-                    occ["suggested_fields"] = sorted(list(active_fields))
-                    sug_cols = ",".join(sorted(active_fields))
+                    occ["suggested_fields"] = sorted(list(active_fields), key=lambda x: (x.lower(), x))
+                    sug_cols = ",".join(sorted(active_fields, key=lambda x: (x.lower(), x)))
                     raw_ep = occ.get("raw_endpoint", "")
                     if "/_api/" in raw_ep:
                         url_part = raw_ep.split("/_api/", 1)[1].split()[0].rstrip("`'\"")

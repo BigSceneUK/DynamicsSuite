@@ -79,9 +79,9 @@ def render_page(ctx: AppContext, client: PortalWebApiAuditorClient) -> None:
         "pwa_reconciliation": None,
         "pwa_last_org": org_url,
     }
-    if st.session_state.get("pwa_version_hash") != "v29_custom_webapi_helpers":
+    if st.session_state.get("pwa_version_hash") != "v30_preserve_navigation_schema_case":
         _invalidate_all_caches(client, clear_code_scan=True, clear_site_settings=True)
-        st.session_state["pwa_version_hash"] = "v29_custom_webapi_helpers"
+        st.session_state["pwa_version_hash"] = "v30_preserve_navigation_schema_case"
 
     for k, v in ss_keys.items():
         if k not in st.session_state or st.session_state.get("pwa_last_org") != org_url:
