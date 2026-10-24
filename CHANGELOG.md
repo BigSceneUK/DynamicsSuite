@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Added Website Discovery Details diagnostic inspector for multi-site Power Pages environments.
   - Improved caching invalidation and site settings resolution.
 
+### 🚀 DynamicsSuite Core (v1.0.3)
+- **Diagnostics & Feedback**: Bumped core version indicator in `core/ui/feedback_dialog.py` to `v1.0.3`.
+- **Packaging & Distribution**: Packaged official `v1.0.3` release archives with `portal_webapi_auditor` v1.3.0.
+
 ---
 
 ## [1.0.2] - 2026-10-17
