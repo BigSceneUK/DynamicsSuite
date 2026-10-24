@@ -25,7 +25,23 @@ def _get_script_execution_info(occ: dict, client: PortalWebApiAuditorClient) -> 
     comp_t = occ.get("component_type", "")
     is_gov = client._is_webapi_governed(occ)
 
-    if comp_t in ("Dynamic UI Catalog", "Entity List (OData Feed)", "Portal Lookup Control"):
+    if occ.get("is_cloudflow") or "cloudflow" in comp_t.lower() or "cloudflow" in occ.get("table_name", "").lower():
+        badge = _badge("⚡ CLOUD FLOW WEB API", "#6f42c1")
+        return (
+            "client",
+            badge,
+            "Power Pages Cloud Flow Trigger",
+            "Executed in browser via /_api/cloudflows/v1.0/trigger/. Governed by Webapi/cloudflows/<flow_id>/enabled.",
+        )
+    if "Site Setting" in comp_t:
+        badge = _badge("⚙️ SITE SETTING SCRIPT (GLOBAL)", "#fd7e14")
+        return (
+            "client",
+            badge,
+            "Global Injected Script (Site Setting)",
+            "Configured globally via Site Settings (e.g. TrackingCode, Header/Footer, Script). Restrict with Webapi fields settings.",
+        )
+    if comp_t in client.FRAMEWORK_COMPONENT_TYPES or "Entity List" in comp_t or "Subgrid" in comp_t or "Form XML" in comp_t:
         badge = _badge("🧩 FRAMEWORK (AUTO-INJECTED WEB API)", "#0d6efd")
         return (
             "framework",
@@ -79,9 +95,10 @@ def render_page(ctx: AppContext, client: PortalWebApiAuditorClient) -> None:
         "pwa_reconciliation": None,
         "pwa_last_org": org_url,
     }
-    if st.session_state.get("pwa_version_hash") != "v30_preserve_navigation_schema_case":
+    if st.session_state.get("pwa_version_hash") != "v37_lookup_expansion_accuracy":
         _invalidate_all_caches(client, clear_code_scan=True, clear_site_settings=True)
-        st.session_state["pwa_version_hash"] = "v30_preserve_navigation_schema_case"
+        st.session_state["pwa_websites"] = None
+        st.session_state["pwa_version_hash"] = "v37_lookup_expansion_accuracy"
 
     for k, v in ss_keys.items():
         if k not in st.session_state or st.session_state.get("pwa_last_org") != org_url:
@@ -124,11 +141,12 @@ def render_page(ctx: AppContext, client: PortalWebApiAuditorClient) -> None:
 
     websites: list[dict] = st.session_state["pwa_websites"] or []
 
-    site_options: dict[str, str] = {"ALL": "🌐 All Portal Websites"}
+    site_options: dict[str, str] = {"ALL": "🌐 All Portal & Power Pages Websites"}
     for w in websites:
         name = w.get("name") or "Unnamed Portal"
         domain = f" ({w.get('domain')})" if w.get("domain") else ""
-        site_options[w["id"]] = f"{name}{domain}"
+        badge = " ⚡ [Power Pages]" if w.get("schema") == "powerpage" else ""
+        site_options[w["id"]] = f"{name}{domain}{badge}"
 
     col_site, col_refresh, col_scan_btn = st.columns([3, 1, 1.2])
 
@@ -149,12 +167,20 @@ def render_page(ctx: AppContext, client: PortalWebApiAuditorClient) -> None:
         st.write("")
         if st.button("🔄 Refresh", use_container_width=True, key="pwa_refresh_btn"):
             _invalidate_all_caches(client, clear_code_scan=True, clear_site_settings=True)
+            st.session_state["pwa_websites"] = None
             st.rerun()
 
     with col_scan_btn:
         st.write("")
         st.write("")
         run_deep_scan = st.button("🔍 Deep Scan Code", type="primary", use_container_width=True, key="pwa_scan_btn")
+
+    # Diagnostic inspection expander to verify connected environment and discovered sites
+    with st.expander("🔍 Website Discovery Details", expanded=False):
+        st.markdown(f"**Connected Environment Dataverse URL:** `{client.org_url}`")
+        st.markdown(f"**Discovered Sites ({len(websites)} total):**")
+        for w in websites:
+            st.markdown(f"- **{w.get('name')}** (Model: `{w.get('schema')}`, ID: `{w.get('id')}`, Domain: `{w.get('domain')}`)")
 
     target_website_id = None if selected_site_key == "ALL" else selected_site_key
 
@@ -179,6 +205,9 @@ def render_page(ctx: AppContext, client: PortalWebApiAuditorClient) -> None:
                 target_website_id, known_tables=known_tbls, table_fields_map=tbl_fields_map
             )
             st.session_state["pwa_code_scan"] = code_occurrences
+            for k in list(st.session_state.keys()):
+                if k.startswith("pwa_ctx_"):
+                    del st.session_state[k]
             curr_mode = st.session_state.get("pwa_suggestion_mode", "forms")
             st.session_state["pwa_reconciliation"] = client.reconcile_webapi_usage(
                 site_settings, code_occurrences, suggestion_mode=curr_mode, target_website_id=target_website_id
@@ -252,6 +281,28 @@ def render_page(ctx: AppContext, client: PortalWebApiAuditorClient) -> None:
     else:
         reconciliation = st.session_state["pwa_reconciliation"]
 
+    # Debug snapshot to diagnose site settings count and wildcard status
+    try:
+        with open("debug_pwa_state.log", "w") as f_snap:
+            f_snap.write(f"Selected site key: {selected_site_key}\n")
+            f_snap.write(f"Target website id: {target_website_id}\n")
+            f_snap.write(f"Suggestion mode: {selected_mode}\n")
+            f_snap.write(f"Total site_settings: {len(site_settings)}\n")
+            for s in site_settings:
+                f_snap.write(f"SITE_SETTING: table={s.get('table_name')}, wildcard={s.get('has_wildcard')}, fields={s.get('fields_raw')}, site={s.get('website_id')}\n")
+            f_snap.write(f"\nTotal reconciliation: {len(reconciliation)}\n")
+            for r in reconciliation:
+                strict_c = len([x for x in (r.get("recommended_fields_strict") or "").split(",") if x.strip()])
+                form_c = len([x for x in (r.get("recommended_fields_forms") or "").split(",") if x.strip()])
+                server_c = len([x for x in (r.get("recommended_fields_server") or "").split(",") if x.strip()])
+                f_snap.write(
+                    f"RECON: table={r.get('table_name')}, mode={r.get('suggestion_mode')}, "
+                    f"status={r.get('status_level')}, wildcard={r.get('has_wildcard')}, "
+                    f"fields={r.get('configured_fields_raw')}, "
+                    f"strict={strict_c}cols, forms={form_c}cols, server={server_c}cols\n"
+                )
+    except Exception:
+        pass
 
     # ------------------------------------------------------------------
     # KPI Metrics Bar
@@ -650,7 +701,7 @@ def render_page(ctx: AppContext, client: PortalWebApiAuditorClient) -> None:
                     setting_id = rec_item.get("setting_id")
                     selected_site_obj = next((w for w in websites if w["id"] == target_website_id), None)
                     target_schema = selected_site_obj.get("schema") if selected_site_obj else (client.get_website_schema(target_website_id) if target_website_id else "adx")
-                    default_setting_table = f"{target_schema}_sitesettings"
+                    default_setting_table = "powerpagecomponents" if target_schema == "powerpage" else f"{target_schema}_sitesettings"
                     setting_table = (rec_item.get("setting_table") if setting_id else None) or default_setting_table
                     site_id = rec_item.get("website_id") or target_website_id or (websites[0]["id"] if websites else "")
 
@@ -801,7 +852,14 @@ def render_page(ctx: AppContext, client: PortalWebApiAuditorClient) -> None:
                 st.markdown(f"### 🔍 Deep Inspection: `{dd_table}`")
                 
                 cache_key = f"pwa_ctx_{dd_table}_{target_website_id}"
-                if cache_key not in st.session_state:
+                cached_ctx = st.session_state.get(cache_key)
+                needs_fetch = False
+                if not cached_ctx:
+                    needs_fetch = True
+                elif code_occurrences and not cached_ctx.get("code_occurrences"):
+                    needs_fetch = True
+
+                if needs_fetch:
                     with st.spinner(f"Loading 360° portal context for '{dd_table}'..."):
                         st.session_state[cache_key] = client.get_table_deep_context(
                             dd_table,

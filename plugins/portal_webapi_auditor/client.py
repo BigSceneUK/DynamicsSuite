@@ -38,6 +38,7 @@ COMMON_ENTITY_SET_MAP: dict[str, str] = {
 _PORTAL_MGMT_LOCATIONS: dict[str, str] = {
     "adx_sitesettings": "Portal Management → Site Settings",
     "mspp_sitesettings": "Power Pages Management → Site Settings",
+    "powerpagecomponents": "Power Pages Management → Power Page Components",
     "adx_webtemplates": "Portal Management → Web Templates",
     "mspp_webtemplates": "Power Pages Management → Web Templates",
     "adx_webpages": "Portal Management → Web Pages",
@@ -57,6 +58,7 @@ _PORTAL_MGMT_LOCATIONS: dict[str, str] = {
 _TABLE_ENTITY_NAMES: dict[str, str] = {
     "adx_sitesettings": "adx_sitesetting",
     "mspp_sitesettings": "mspp_sitesetting",
+    "powerpagecomponents": "powerpagecomponent",
     "adx_webtemplates": "adx_webtemplate",
     "mspp_webtemplates": "mspp_webtemplate",
     "adx_webpages": "adx_webpage",
@@ -95,20 +97,22 @@ class PortalWebApiAuditorClient:
         self.last_errors: list[str] = []
         self._entity_set_cache: dict[str, str] = dict(COMMON_ENTITY_SET_MAP)
         self._table_attributes_cache: dict[str, list[str]] = {}
-        self._table_lookup_schema_map: dict[str, dict[str, str]] = {}
         self._form_fields_cache: dict[str, list[str]] = {}
         self._form_fields_by_name_cache: dict[tuple[str, str], list[str]] = {}
+        self._view_fields_cache: dict[str, list[str]] = {}
         self._portal_mgmt_app_id: Optional[str] = None
         self._website_schema_cache: dict[str, str] = {}
         self._website_name_cache: dict[str, str] = {}
         self.discovered_wrapper_funcs: set[str] = set()
+        self._lookup_schema_map: dict[str, dict[str, tuple[str, str]]] = {}
 
     def clear_all_caches(self) -> None:
         """Clear all internal in-memory caches to guarantee 100% fresh data on re-scans."""
         self._table_attributes_cache.clear()
-        self._table_lookup_schema_map.clear()
         self._form_fields_cache.clear()
         self._form_fields_by_name_cache.clear()
+        self._view_fields_cache.clear()
+        self._lookup_schema_map.clear()
         self._entity_set_cache = dict(COMMON_ENTITY_SET_MAP)
         self._website_schema_cache.clear()
         self._website_name_cache.clear()
@@ -225,10 +229,36 @@ class PortalWebApiAuditorClient:
     # ------------------------------------------------------------------
 
     def get_websites(self) -> list[dict]:
-        """Fetch all portal websites across adx and mspp schemas."""
+        """Fetch all portal and Power Pages websites across powerpagesite, adx, and mspp schemas."""
         websites: list[dict] = []
         seen_ids: set[str] = set()
 
+
+
+        # 1. Enhanced Data Model (Power Pages - powerpagesites)
+        pp_sites = self._fetch_all_pages("powerpagesites?$select=powerpagesiteid,name,primarydomainname&$orderby=name asc", max_pages=10)
+        if not pp_sites:
+            pp_sites = self._fetch_all_pages("powerpagesites?$select=powerpagesiteid,name", max_pages=10)
+        if not pp_sites:
+            pp_sites = self._fetch_all_pages("powerpagesites", max_pages=10)
+
+        for s in (pp_sites or []):
+            sid = s.get("powerpagesiteid")
+            wname = s.get("name") or s.get("powerpagesitename") or "Unnamed Power Pages Site"
+            domain = s.get("primarydomainname") or s.get("powerpagesiteurl") or ""
+            if sid:
+                self._website_schema_cache[sid] = "powerpage"
+                self._website_name_cache[sid] = wname
+            if sid and sid not in seen_ids:
+                seen_ids.add(sid)
+                websites.append({
+                    "id": sid,
+                    "name": wname,
+                    "domain": domain,
+                    "schema": "powerpage",
+                })
+
+        # 2. Standard and Legacy Portal Models (adx_websites and mspp_websites)
         for schema in ["adx", "mspp"]:
             table = f"{schema}_websites"
             id_col = f"{schema}_websiteid"
@@ -253,12 +283,17 @@ class PortalWebApiAuditorClient:
         return websites
 
     def get_website_schema(self, website_id: Optional[str]) -> str:
-        """Return 'mspp' (Enhanced Data Model) or 'adx' (Standard Data Model) for a website_id."""
+        """Return 'powerpage', 'mspp', or 'adx' for a website_id."""
         if not website_id:
             return "adx"
         if website_id in self._website_schema_cache:
             return self._website_schema_cache[website_id]
         # Query Dataverse directly if not preloaded in cache
+        chk_pp = self._odata_get(f"powerpagesites({website_id})?$select=powerpagesiteid,name")
+        if chk_pp and chk_pp.get("powerpagesiteid"):
+            self._website_schema_cache[website_id] = "powerpage"
+            self._website_name_cache[website_id] = chk_pp.get("name") or ""
+            return "powerpage"
         chk_mspp = self._odata_get(f"mspp_websites({website_id})?$select=mspp_websiteid,mspp_name")
         if chk_mspp and chk_mspp.get("mspp_websiteid"):
             self._website_schema_cache[website_id] = "mspp"
@@ -427,15 +462,16 @@ class PortalWebApiAuditorClient:
                     continue
             filtered.append(f_raw)
 
-        # Deduplicate exact string matches while preserving both lowercase Logical Names
-        # (e.g. 'app_candidate' for GET/read) and mixed-case Schema Names (e.g. 'app_Candidate' for @odata.bind POST/PATCH).
-        # If an attribute has a mixed-case Schema Name, ensure its corresponding lowercase Logical Name is also included.
-        result_set: set[str] = set(filtered)
-        for f_raw in list(result_set):
+        # Deduplicate case-insensitively while preferring explicit mixed-case SchemaNames
+        # (e.g. 'crimson_Student' from @odata.bind over 'crimson_student')
+        by_lower: dict[str, str] = {}
+        for f_raw in filtered:
             fl = f_raw.lower()
-            if f_raw != fl:
-                result_set.add(fl)
-        return sorted(result_set, key=lambda x: (x.lower(), x))
+            if fl not in by_lower:
+                by_lower[fl] = f_raw
+            elif f_raw != fl and by_lower[fl] == fl:
+                by_lower[fl] = f_raw
+        return sorted(by_lower.values(), key=lambda x: (x.lower(), x))
 
     def get_table_attributes(self, table_name: str) -> list[str]:
         """
@@ -443,22 +479,18 @@ class PortalWebApiAuditorClient:
         Applies smart filtering to exclude internal system plumbing (Exchange sync,
         workflow engine state, activity parties) and virtual display names (*name, *yominame)
         so that generated Web API whitelists remain clean, performant, and secure.
-        Preserves both lowercase Logical Names (for GET / $select queries) and
-        mixed-case Schema Names (for @odata.bind Lookup POST / PATCH requests).
         """
         clean_tbl = table_name.strip().lower()
         if clean_tbl in self._table_attributes_cache:
             return self._table_attributes_cache[clean_tbl]
 
         attrs: set[str] = {f"{clean_tbl}id", "createdon", "modifiedon", "statecode", "statuscode", "ownerid"}
-        lookup_schemas: dict[str, str] = {}
         try:
             url = f"EntityDefinitions(LogicalName='{clean_tbl}')/Attributes?$select=LogicalName,SchemaName,AttributeType,AttributeOf,IsValidForRead"
             rows = self._fetch_all_pages(url, max_pages=10)
             if rows:
                 for r in rows:
                     l_name = (r.get("LogicalName") or "").lower()
-                    s_name = (r.get("SchemaName") or "").strip()
                     attr_type = (r.get("AttributeType") or "").lower()
                     attr_of = (r.get("AttributeOf") or "").lower()
 
@@ -475,21 +507,21 @@ class PortalWebApiAuditorClient:
 
                     attrs.add(l_name)
 
-                    # For lookups, include _<name>_value AND SchemaName (required for @odata.bind)
+                    # For lookups, include _<name>_value and exact SchemaName (e.g. crimson_ExpressionofInterest)
                     if ("lookup" in attr_type or "customer" in attr_type or "owner" in attr_type):
                         attrs.add(f"_{l_name}_value")
+                        s_name = r.get("SchemaName")
                         if s_name:
                             attrs.add(s_name)
-                            if s_name != l_name:
-                                lookup_schemas[l_name] = s_name
+                            if not hasattr(self, "_lookup_schema_map"):
+                                self._lookup_schema_map = {}
+                            m = self._lookup_schema_map.setdefault(clean_tbl, {})
+                            m[l_name] = (s_name, l_name)
+                            m[f"{l_name}id"] = (s_name, l_name)
+                            m[f"_{l_name}_value"] = (s_name, l_name)
+                            m[s_name.lower()] = (s_name, l_name)
         except Exception as exc:
             logger.debug("Failed fetching attributes for %s: %s", clean_tbl, exc)
-
-        if lookup_schemas:
-            self._table_lookup_schema_map[clean_tbl] = lookup_schemas
-            resolved_key = self.resolve_entity_name(clean_tbl)
-            if resolved_key:
-                self._table_lookup_schema_map[resolved_key] = lookup_schemas
 
         # Apply smart filter to clean out system plumbing, internal sync, and virtual display names
         attr_list = self.filter_table_attributes(list(attrs))
@@ -543,6 +575,9 @@ class PortalWebApiAuditorClient:
             # Or <lookup> if _<lookup>_value is in valid_set
             elif f"_{fl}_value" in valid_set:
                 valid_fields.append(f_raw)
+            # Or <lookup>id alias (e.g. crimson_expressionofinterestid -> crimson_expressionofinterest)
+            elif fl.endswith("id") and (fl[:-2] in valid_set or f"_{fl[:-2]}_value" in valid_set):
+                valid_fields.append(f_raw)
             else:
                 invalid_fields.append(f_raw)
 
@@ -595,6 +630,24 @@ class PortalWebApiAuditorClient:
             logger.debug("Failed fetching form fields for %s / %s: %s", clean_ent, clean_form, exc)
         return []
 
+    def get_form_subgrid_entities(self, entity_name: str, form_name: str) -> list[str]:
+        """Extract all related target entity names rendered inside subgrids on a model-driven form."""
+        clean_ent = entity_name.strip().lower()
+        clean_form = form_name.strip()
+        if not clean_ent or not clean_form:
+            return []
+        try:
+            query = f"systemforms?$filter=objecttypecode eq '{clean_ent}' and name eq '{quote(clean_form)}'&$select=formid,formxml&$top=1"
+            res = self._odata_get(query)
+            if res and res.get("value") and len(res["value"]) > 0:
+                fxml = res["value"][0].get("formxml")
+                if fxml:
+                    targets = re.findall(r"""<TargetEntityType>([a-zA-Z0-9_]+)</TargetEntityType>""", fxml, re.IGNORECASE)
+                    return sorted(list(set(t.strip().lower() for t in targets if t and t.strip())))
+        except Exception as exc:
+            logger.debug("Failed fetching form subgrids for %s / %s: %s", clean_ent, clean_form, exc)
+        return []
+
     def load_all_form_fields(self) -> dict[str, set[str]]:
         """Fetch all Basic Forms and Multistep Steps across the portal once, mapping entity -> set of fields."""
         if hasattr(self, "_all_form_fields_map") and self._all_form_fields_map:
@@ -639,6 +692,123 @@ class PortalWebApiAuditorClient:
         direct = all_map.get(clean_ent, set()) | all_map.get(table_name.strip().lower(), set())
         return sorted(list(direct))
 
+    def get_view_fields_by_id(self, view_id: str) -> list[str]:
+        """Extract all field logical names configured on a model-driven view (savedquery or userquery)."""
+        clean_vid = view_id.strip("{}").lower()
+        if not clean_vid:
+            return []
+        if clean_vid in self._view_fields_cache:
+            return self._view_fields_cache[clean_vid]
+
+        fields: set[str] = set()
+        try:
+            # 1. Try savedquery (system view)
+            res = self._odata_get(f"savedqueries({clean_vid})?$select=savedqueryid,layoutxml,fetchxml")
+            if not res or not (res.get("layoutxml") or res.get("fetchxml")):
+                # 2. Try userquery (personal view)
+                res = self._odata_get(f"userqueries({clean_vid})?$select=userqueryid,layoutxml,fetchxml")
+
+            if res:
+                lxml = res.get("layoutxml") or ""
+                if lxml:
+                    cell_matches = re.findall(r"""<cell\s+name=["']([a-zA-Z0-9_]+)["']""", lxml, re.IGNORECASE)
+                    for m in cell_matches:
+                        if m and m != "*":
+                            fields.add(m.lower())
+
+                fxml = res.get("fetchxml") or ""
+                if fxml:
+                    attr_matches = re.findall(r"""<attribute\s+name=["']([a-zA-Z0-9_]+)["']""", fxml, re.IGNORECASE)
+                    for m in attr_matches:
+                        if m and m != "*":
+                            fields.add(m.lower())
+                    order_matches = re.findall(r"""<order\s+attribute=["']([a-zA-Z0-9_]+)["']""", fxml, re.IGNORECASE)
+                    for m in order_matches:
+                        if m and m != "*":
+                            fields.add(m.lower())
+                    cond_matches = re.findall(r"""<condition\s+attribute=["']([a-zA-Z0-9_]+)["']""", fxml, re.IGNORECASE)
+                    for m in cond_matches:
+                        if m and m != "*":
+                            fields.add(m.lower())
+        except Exception as exc:
+            logger.debug("Failed fetching view fields for view %s: %s", clean_vid, exc)
+
+        field_list = sorted(list(fields))
+        self._view_fields_cache[clean_vid] = field_list
+        return field_list
+
+    def get_entity_list_view_fields(self, entity_name: str, views_raw: str) -> list[str]:
+        """
+        Extract all field logical names configured on an Entity List's views.
+        Also automatically expands lookup attributes to include _<lookup>_value,
+        and includes primary key, statecode, and statuscode.
+        """
+        clean_ent = self.resolve_entity_name(entity_name).strip().lower()
+        if not clean_ent:
+            clean_ent = entity_name.strip().lower()
+
+        view_ids = re.findall(r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}", views_raw or "")
+        fields: set[str] = set()
+
+        for vid in view_ids:
+            v_fields = self.get_view_fields_by_id(vid)
+            if v_fields:
+                fields.update(v_fields)
+
+        # Fallback: if no view GUIDs found in views_raw, check if view name is in XML e.g. name="View Name"
+        if not fields and clean_ent and views_raw:
+            name_matches = re.findall(r"""name=["']([^"']+)["']""", views_raw)
+            for v_name in name_matches:
+                try:
+                    name_q = f"savedqueries?$filter=returnedtypecode eq '{clean_ent}' and name eq '{quote(v_name.strip())}'&$select=savedqueryid,layoutxml,fetchxml&$top=1"
+                    res = self._odata_get(name_q)
+                    if res and res.get("value") and len(res["value"]) > 0:
+                        vid = res["value"][0].get("savedqueryid")
+                        if vid:
+                            v_fields = self.get_view_fields_by_id(vid)
+                            if v_fields:
+                                fields.update(v_fields)
+                except Exception as exc:
+                    logger.debug("Failed fetching view by name %s: %s", v_name, exc)
+
+        # Fallback: if still no views resolved, fetch default public view for entity
+        if not fields and clean_ent:
+            try:
+                def_q = f"savedqueries?$filter=returnedtypecode eq '{clean_ent}' and isdefault eq true and querytype eq 0&$select=savedqueryid,layoutxml,fetchxml&$top=1"
+                res = self._odata_get(def_q)
+                if res and res.get("value") and len(res["value"]) > 0:
+                    vid = res["value"][0].get("savedqueryid")
+                    if vid:
+                        v_fields = self.get_view_fields_by_id(vid)
+                        if v_fields:
+                            fields.update(v_fields)
+            except Exception as exc:
+                logger.debug("Failed fetching default view for %s: %s", clean_ent, exc)
+
+        if not fields:
+            return []
+
+        # Expand view lookup columns to include _<name>_value required by portal list grid
+        valid_attrs = set(a.lower() for a in self.get_table_attributes(clean_ent))
+        expanded_fields: set[str] = set()
+        for f in fields:
+            f_low = f.lower()
+            expanded_fields.add(f_low)
+            lookup_val = f"_{f_low}_value"
+            if lookup_val in valid_attrs:
+                expanded_fields.add(lookup_val)
+
+        # Ensure essential portal list fields are present
+        pk = f"{clean_ent}id"
+        if pk in valid_attrs:
+            expanded_fields.add(pk)
+        if "statecode" in valid_attrs:
+            expanded_fields.add("statecode")
+        if "statuscode" in valid_attrs:
+            expanded_fields.add("statuscode")
+
+        return sorted(list(expanded_fields))
+
     # ------------------------------------------------------------------
     # Site Settings Audit
     # ------------------------------------------------------------------
@@ -652,98 +822,161 @@ class PortalWebApiAuditorClient:
         self.preload_entity_definitions()
         settings_raw: list[dict] = []
 
-        for schema in ["adx", "mspp"]:
-            table = f"{schema}_sitesettings"
-            id_col = f"{schema}_sitesettingid"
-            name_col = f"{schema}_name"
-            val_col = f"{schema}_value"
-            site_col = f"_{schema}_websiteid_value"
+        target_schema = self.get_website_schema(website_id) if website_id else None
 
-            filter_clause = f"contains({name_col}, 'webapi') or contains({name_col}, 'Webapi')"
+        # 1. Enhanced Data Model: powerpagecomponents (types 9 & 27)
+        if not website_id or target_schema == "powerpage":
+            ppc_filter = "(powerpagecomponenttype eq 9 or powerpagecomponenttype eq 27)"
             if website_id:
-                filter_clause = f"({filter_clause}) and {site_col} eq {website_id}"
+                ppc_filter += f" and _powerpagesiteid_value eq {website_id}"
 
-            query = f"{table}?$filter={quote(filter_clause)}&$select={id_col},{name_col},{val_col},{site_col}"
-            rows = self._fetch_all_pages(query, max_pages=10)
-            for r in rows:
-                r["_schema"] = schema
-                r["_table"] = table
-                r["_id_col"] = id_col
-                r["_name_col"] = name_col
-                r["_val_col"] = val_col
-                r["_site_col"] = site_col
+            ppc_query = f"powerpagecomponents?$filter={quote(ppc_filter)}&$select=powerpagecomponentid,name,content,_powerpagesiteid_value"
+            ppc_rows = self._fetch_all_pages(ppc_query, max_pages=15)
+            for r in ppc_rows:
+                comp_name = (r.get("name") or "").strip()
+                content_raw = r.get("content") or "{}"
+                content_json = {}
+                if isinstance(content_raw, str):
+                    try:
+                        content_json = json.loads(content_raw)
+                    except Exception:
+                        pass
+                elif isinstance(content_raw, dict):
+                    content_json = content_raw
+
+                setting_name = comp_name or content_json.get("adx_name") or content_json.get("name") or ""
+                if "webapi" not in setting_name.lower():
+                    continue
+
+                setting_val = content_json.get("adx_value") or content_json.get("value") or ""
+                site_id_val = r.get("_powerpagesiteid_value") or (website_id or "")
+
+                r["_schema"] = "powerpage"
+                r["_table"] = "powerpagecomponents"
+                r["_id_col"] = "powerpagecomponentid"
+                r["_name_col"] = "_parsed_name"
+                r["_val_col"] = "_parsed_val"
+                r["_site_col"] = "_powerpagesiteid_value"
+                r["_parsed_name"] = setting_name
+                r["_parsed_val"] = setting_val
+                r["_powerpagesiteid_value"] = site_id_val
                 settings_raw.append(r)
 
-        # Parse and aggregate settings by (website_id, table_name)
-        # Regex to extract: Webapi/<table_name>/<setting_key>
-        pattern = re.compile(r"^webapi/([^/]+)/([^/]+)$", re.IGNORECASE)
-        grouped: dict[tuple[str, str], dict] = {}
+        # 2. Standard and Legacy Data Models: adx_sitesettings & mspp_sitesettings
+        if not website_id or target_schema in ("adx", "mspp"):
+            for schema in ["adx", "mspp"]:
+                table = f"{schema}_sitesettings"
+                id_col = f"{schema}_sitesettingid"
+                name_col = f"{schema}_name"
+                val_col = f"{schema}_value"
+                site_col = f"_{schema}_websiteid_value"
 
-        for r in settings_raw:
-            schema = r["_schema"]
-            name_val = (r.get(r["_name_col"]) or "").strip()
-            raw_val = (r.get(r["_val_col"]) or "").strip()
-            rec_id = r.get(r["_id_col"]) or ""
-            web_id = r.get(r["_site_col"]) or ""
+                filter_clause = f"contains({name_col}, 'webapi') or contains({name_col}, 'Webapi')"
+                if website_id:
+                    filter_clause = f"({filter_clause}) and {site_col} eq {website_id}"
 
-            match = pattern.match(name_val)
-            if not match:
-                continue
+                query = f"{table}?$filter={quote(filter_clause)}&$select={id_col},{name_col},{val_col},{site_col}"
+                rows = self._fetch_all_pages(query, max_pages=10)
+                for r in rows:
+                    r["_schema"] = schema
+                    r["_table"] = table
+                    r["_id_col"] = id_col
+                    r["_name_col"] = name_col
+                    r["_val_col"] = val_col
+                    r["_site_col"] = site_col
+                    settings_raw.append(r)
 
-            table_part = match.group(1).strip().lower()
-            setting_key = match.group(2).strip().lower()
-            logical_table = self.resolve_entity_name(table_part)
+        # Debug logging to investigate 3 vs 4 wildcards
+        try:
+            with open("debug_pwa.log", "w") as f_dbg:
+                f_dbg.write(f"=== get_webapi_site_settings ===\nTarget website_id: {website_id}\n")
+                f_dbg.write(f"Total settings_raw: {len(settings_raw)}\n")
+                for r in settings_raw:
+                    name_val = (r.get(r["_name_col"]) or "").strip()
+                    val_val = (r.get(r["_val_col"]) or "").strip()
+                    site_val = (r.get(r["_site_col"]) or "")
+                    f_dbg.write(f"RAW: {r['_schema']} | name='{name_val}' | val='{val_val}' | site='{site_val}'\n")
 
-            group_key = (web_id, logical_table)
-            if group_key not in grouped:
-                grouped[group_key] = {
-                    "website_id": web_id,
-                    "table_name": logical_table,
-                    "table_alias_raw": table_part,
-                    "schema": schema,
-                    "setting_table": r["_table"],
-                    "enabled": False,
-                    "enabled_setting_id": None,
-                    "fields_raw": "",
-                    "fields_setting_id": None,
-                    "fields_list": [],
-                    "has_wildcard": False,
-                    "error_handling": "",
-                    "error_handling_setting_id": None,
-                    "duplicate_fields_settings": [],
-                }
+                # Parse and aggregate settings by (website_id, table_name)
+                # Regex to extract: Webapi/<table_name>/<setting_key>
+                pattern = re.compile(r"^webapi/([^/]+)/([^/]+)$", re.IGNORECASE)
 
-            item = grouped[group_key]
-            if setting_key == "enabled":
-                item["enabled"] = raw_val.lower() in ("true", "1", "yes")
-                item["enabled_setting_id"] = rec_id
-            elif setting_key == "fields":
-                is_wc = "*" in raw_val
-                if item["fields_setting_id"] and item["fields_setting_id"] != rec_id:
-                    item["duplicate_fields_settings"].append({
-                        "name": name_val,
-                        "val": raw_val,
-                        "id": rec_id,
-                    })
+                grouped: dict[tuple[str, str], dict] = {}
 
-                # If ANY setting record for this table has wildcard '*', preserve has_wildcard = True!
-                if is_wc:
-                    item["has_wildcard"] = True
-                    item["fields_raw"] = raw_val
-                    item["fields_setting_id"] = rec_id
-                elif not item["has_wildcard"]:
-                    item["fields_raw"] = raw_val
-                    item["fields_setting_id"] = rec_id
+                for r in settings_raw:
+                    schema = r["_schema"]
+                    name_val = (r.get(r["_name_col"]) or "").strip()
+                    raw_val = (r.get(r["_val_col"]) or "").strip()
+                    rec_id = r.get(r["_id_col"]) or ""
+                    web_id = r.get(r["_site_col"]) or ""
 
-                cols = [c.strip() for c in raw_val.split(",") if c.strip()]
-                existing_cols = set(item["fields_list"])
-                for c in cols:
-                    if c not in existing_cols:
-                        item["fields_list"].append(c)
-                        existing_cols.add(c)
-            elif setting_key in ("error-handling", "errorhandling"):
-                item["error_handling"] = raw_val
-                item["error_handling_setting_id"] = rec_id
+                    match = pattern.match(name_val)
+                    if not match:
+                        f_dbg.write(f"NO MATCH: '{name_val}'\n")
+                        continue
+
+                    table_part = match.group(1).strip().lower()
+                    setting_key = match.group(2).strip().lower()
+                    logical_table = self.resolve_entity_name(table_part)
+
+                    f_dbg.write(f"PARSED: table_part='{table_part}', key='{setting_key}', logical='{logical_table}', val='{raw_val}'\n")
+
+                    group_key = (web_id, logical_table)
+                    if group_key not in grouped:
+                        grouped[group_key] = {
+                            "website_id": web_id,
+                            "table_name": logical_table,
+                            "table_alias_raw": table_part,
+                            "schema": schema,
+                            "setting_table": r["_table"],
+                            "enabled": False,
+                            "enabled_setting_id": None,
+                            "fields_raw": "",
+                            "fields_setting_id": None,
+                            "fields_list": [],
+                            "has_wildcard": False,
+                            "error_handling": "",
+                            "error_handling_setting_id": None,
+                            "duplicate_fields_settings": [],
+                        }
+
+                    item = grouped[group_key]
+                    if setting_key == "enabled":
+                        item["enabled"] = raw_val.lower() in ("true", "1", "yes")
+                        item["enabled_setting_id"] = rec_id
+                    elif setting_key == "fields":
+                        is_wc = "*" in raw_val
+                        if item["fields_setting_id"] and item["fields_setting_id"] != rec_id:
+                            item["duplicate_fields_settings"].append({
+                                "name": name_val,
+                                "val": raw_val,
+                                "id": rec_id,
+                            })
+
+                        # If ANY setting record for this table has wildcard '*', preserve has_wildcard = True!
+                        if is_wc:
+                            item["has_wildcard"] = True
+                            item["fields_raw"] = raw_val
+                            item["fields_setting_id"] = rec_id
+                        elif not item["has_wildcard"]:
+                            item["fields_raw"] = raw_val
+                            item["fields_setting_id"] = rec_id
+
+                        cols = [c.strip() for c in raw_val.split(",") if c.strip()]
+                        existing_cols = set(item["fields_list"])
+                        for c in cols:
+                            if c not in existing_cols:
+                                item["fields_list"].append(c)
+                                existing_cols.add(c)
+                    elif setting_key in ("error-handling", "errorhandling"):
+                        item["error_handling"] = raw_val
+                        item["error_handling_setting_id"] = rec_id
+
+                f_dbg.write(f"=== GROUPED RESULT ({len(grouped)}) ===\n")
+                for k, v in grouped.items():
+                    f_dbg.write(f"GROUPED: {k} -> wildcard={v['has_wildcard']}, fields='{v['fields_raw']}', dups={len(v['duplicate_fields_settings'])}\n")
+        except Exception as exc:
+            logger.debug("Debug log error: %s", exc)
 
         return list(grouped.values())
 
@@ -786,8 +1019,8 @@ class PortalWebApiAuditorClient:
             # (schema, table, id_col, name_col, [content_cols], site_col, component_type)
             ("adx", "adx_webtemplates", "adx_webtemplateid", "adx_name", ["adx_source"], "_adx_websiteid_value", "Web Template"),
             ("mspp", "mspp_webtemplates", "mspp_webtemplateid", "mspp_name", ["mspp_source"], "_mspp_websiteid_value", "Web Template"),
-            ("adx", "adx_webpages", "adx_webpageid", "adx_name", ["adx_customjavascript", "adx_copy"], "_adx_websiteid_value", "Web Page"),
-            ("mspp", "mspp_webpages", "mspp_webpageid", "mspp_name", ["mspp_customjavascript", "mspp_copy"], "_mspp_websiteid_value", "Web Page"),
+            ("adx", "adx_webpages", "adx_webpageid", "adx_name", ["adx_customjavascript", "adx_copy", "adx_summary"], "_adx_websiteid_value", "Web Page"),
+            ("mspp", "mspp_webpages", "mspp_webpageid", "mspp_name", ["mspp_customjavascript", "mspp_copy", "mspp_summary"], "_mspp_websiteid_value", "Web Page"),
             ("adx", "adx_entityforms", "adx_entityformid", "adx_name", ["adx_registerstartupscript"], "_adx_websiteid_value", "Basic Form"),
             ("mspp", "mspp_entityforms", "mspp_entityformid", "mspp_name", ["mspp_registerstartupscript"], "_mspp_websiteid_value", "Basic Form"),
             ("adx", "adx_webformsteps", "adx_webformstepid", "adx_name", ["adx_registerstartupscript"], None, "Multistep Form Step"),
@@ -800,76 +1033,184 @@ class PortalWebApiAuditorClient:
             ("mspp", "mspp_entityformmetadatas", "mspp_entityformmetadataid", "mspp_attributelogicalname", ["mspp_description", "mspp_label"], None, "Form Metadata (Inline Script)"),
             ("adx", "adx_webformstepmetadatas", "adx_webformstepmetadataid", "adx_attributelogicalname", ["adx_description", "adx_label"], None, "Step Metadata (Inline Script)"),
             ("mspp", "mspp_webformstepmetadatas", "mspp_webformstepmetadataid", "mspp_attributelogicalname", ["mspp_description", "mspp_label"], None, "Step Metadata (Inline Script)"),
+            ("adx", "adx_sitesettings", "adx_sitesettingid", "adx_name", ["adx_value"], "_adx_websiteid_value", "Site Setting (Script/Tracking)"),
+            ("mspp", "mspp_sitesettings", "mspp_sitesettingid", "mspp_name", ["mspp_value"], "_mspp_websiteid_value", "Site Setting (Script/Tracking)"),
         ]
 
         # 1. Scan standard text / code fields across templates, pages, forms, snippets, metadata
-        logger.debug("Starting deep scan diagnostics for website_id: %s, known_tables: %s", website_id, sorted(list(known_tbl_set)))
+        dbg_log = open("debug_deep_scan.log", "w")
+        dbg_log.write(f"=== DEEP SCAN DIAGNOSTICS ===\nWebsite ID: {website_id}\nKnown Tables: {sorted(list(known_tbl_set))}\n\n")
 
         # Collect all code blocks and pre-index JS query helper functions across all templates/components
         all_code_blocks: list[dict] = []
         query_func_registry: dict[str, dict] = {}
 
-        for schema, table, id_col, name_col, content_cols, site_col, comp_type in scan_targets:
-            select_cols = [id_col, name_col] + content_cols
-            if site_col:
-                select_cols.append(site_col)
+        target_schema = self.get_website_schema(website_id) if website_id else None
 
-            filter_clauses = []
-            if website_id and site_col:
-                filter_clauses.append(f"({site_col} eq {website_id} or {site_col} eq null)")
+        # Pass 1A: Scan Enhanced Data Model powerpagecomponents (Web Templates, Pages, Forms, Lists, Snippets)
+        if not website_id or target_schema == "powerpage":
+            ppc_types = {
+                11: "Web Template",
+                2: "Web Page",
+                15: "Basic Form",
+                19: "Multistep Form Step",
+                21: "Entity List",
+                7: "Content Snippet",
+                20: "Step Metadata (Inline Script)",
+                26: "Form Metadata (Inline Script)",
+                9: "Site Setting (Script/Tracking)",
+            }
+            type_filter = " or ".join([f"powerpagecomponenttype eq {t}" for t in ppc_types])
+            ppc_filter = f"({type_filter})"
+            if website_id:
+                ppc_filter += f" and _powerpagesiteid_value eq {website_id}"
 
-            query = f"{table}?$select={','.join(select_cols)}"
-            if filter_clauses:
-                query += f"&$filter={quote(' and '.join(filter_clauses))}"
+            ppc_query = f"powerpagecomponents?$filter={quote(ppc_filter)}&$select=powerpagecomponentid,name,powerpagecomponenttype,content,_powerpagesiteid_value"
+            ppc_rows = self._fetch_all_pages(ppc_query, max_pages=30)
+            dbg_log.write(f"Target: powerpagecomponents (Power Pages Enhanced Model) -> fetched {len(ppc_rows)} records\n")
 
-            rows = self._fetch_all_pages(query, max_pages=30)
-            if not rows and any("registerstartupscript" in c for c in content_cols):
-                # Fallback to customjavascript if registerstartupscript is not present in this schema
-                fallback_cols = [c.replace("registerstartupscript", "customjavascript") for c in content_cols]
-                f_query = f"{table}?$select={','.join([id_col, name_col] + fallback_cols)}"
-                if site_col:
-                    f_query += f",{site_col}"
-                if filter_clauses:
-                    f_query += f"&$filter={quote(' and '.join(filter_clauses))}"
-                fallback_rows = self._fetch_all_pages(f_query, max_pages=30)
-                if fallback_rows:
-                    rows = fallback_rows
-                    content_cols = fallback_cols
+            for r in ppc_rows:
+                cid = r.get("powerpagecomponentid") or ""
+                cname = r.get("name") or "Power Page Component"
+                ctype_code = r.get("powerpagecomponenttype")
+                comp_type = ppc_types.get(ctype_code, "Power Page Component")
+                site_val = r.get("_powerpagesiteid_value") or website_id or ""
+                content_raw = r.get("content") or ""
 
-            with_code = sum(1 for r in rows if any(r.get(c) for c in content_cols))
-            logger.debug("Target: %s (%s) -> fetched %d records (%d with code)", table, comp_type, len(rows), with_code)
-            if len(rows) == 0 and self.last_errors:
-                logger.debug("   [Notice] Last error: %s", self.last_errors[-1])
+                extracted_snippets = []
+                if isinstance(content_raw, str):
+                    if content_raw.strip().startswith("{") and content_raw.strip().endswith("}"):
+                        try:
+                            cjson = json.loads(content_raw)
+                            if isinstance(cjson, dict):
+                                for key in [
+                                    "source", "adx_source",
+                                    "customjavascript", "adx_customjavascript",
+                                    "registerstartupscript", "adx_registerstartupscript",
+                                    "copy", "adx_copy",
+                                    "value", "adx_value",
+                                    "description", "adx_description",
+                                    "label", "adx_label",
+                                ]:
+                                    txt = cjson.get(key)
+                                    if txt and isinstance(txt, str) and txt.strip():
+                                        extracted_snippets.append((key, txt))
+                        except Exception:
+                            extracted_snippets.append(("content", content_raw))
+                    else:
+                        extracted_snippets.append(("content", content_raw))
 
-            for row in rows:
-                rec_id = row.get(id_col) or ""
-                rec_name = row.get(name_col) or "Unnamed Record"
-                web_id = row.get(site_col) if site_col else ""
+                for col_key, code_text in extracted_snippets:
+                    if comp_type == "Site Setting (Script/Tracking)":
+                        s_name_low = cname.lower()
+                        c_text_low = (code_text or "").lower()
+                        is_script_setting = (
+                            "tracking" in s_name_low
+                            or "header" in s_name_low
+                            or "footer" in s_name_low
+                            or "script" in s_name_low
+                            or "javascript" in s_name_low
+                            or "<script" in c_text_low
+                            or "/_api/" in c_text_low
+                            or "webapi" in c_text_low
+                            or "function" in c_text_low
+                        )
+                        if not is_script_setting:
+                            continue
 
-                for col in content_cols:
-                    code_text = row.get(col)
-                    if not code_text or not isinstance(code_text, str):
-                        continue
-
-                    # Pre-index helper functions in Pass 1
                     helper_map = self._extract_query_helper_functions(code_text)
                     if helper_map:
                         query_func_registry.update(helper_map)
 
                     all_code_blocks.append({
-                        "rec_id": rec_id,
-                        "rec_name": rec_name,
-                        "web_id": web_id,
-                        "table": table,
-                        "col": col,
+                        "rec_id": cid,
+                        "rec_name": cname,
+                        "web_id": site_val,
+                        "table": "powerpagecomponents",
+                        "col": col_key,
                         "comp_type": comp_type,
                         "code_text": code_text,
                     })
 
+        # Pass 1B: Scan standard text / code fields across templates, pages, forms, snippets, metadata (adx & mspp)
+        if not website_id or target_schema in ("adx", "mspp"):
+            for schema, table, id_col, name_col, content_cols, site_col, comp_type in scan_targets:
+                select_cols = [id_col, name_col] + content_cols
+                if site_col:
+                    select_cols.append(site_col)
+
+                filter_clauses = []
+                if website_id and site_col:
+                    filter_clauses.append(f"({site_col} eq {website_id} or {site_col} eq null)")
+
+                query = f"{table}?$select={','.join(select_cols)}"
+                if filter_clauses:
+                    query += f"&$filter={quote(' and '.join(filter_clauses))}"
+
+                rows = self._fetch_all_pages(query, max_pages=30)
+                if not rows and any("registerstartupscript" in c for c in content_cols):
+                    fallback_cols = [c.replace("registerstartupscript", "customjavascript") for c in content_cols]
+                    f_query = f"{table}?$select={','.join([id_col, name_col] + fallback_cols)}"
+                    if site_col:
+                        f_query += f",{site_col}"
+                    if filter_clauses:
+                        f_query += f"&$filter={quote(' and '.join(filter_clauses))}"
+                    fallback_rows = self._fetch_all_pages(f_query, max_pages=30)
+                    if fallback_rows:
+                        rows = fallback_rows
+                        content_cols = fallback_cols
+
+                with_code = sum(1 for r in rows if any(r.get(c) for c in content_cols))
+                dbg_log.write(f"Target: {table} ({comp_type}) -> fetched {len(rows)} records ({with_code} with code)\n")
+                if len(rows) == 0 and self.last_errors:
+                    dbg_log.write(f"   [Notice] Last error: {self.last_errors[-1]}\n")
+
+                for row in rows:
+                    rec_id = row.get(id_col) or ""
+                    rec_name = row.get(name_col) or "Unnamed Record"
+                    web_id = row.get(site_col) if site_col else ""
+
+                    for col in content_cols:
+                        code_text = row.get(col)
+                        if not code_text or not isinstance(code_text, str):
+                            continue
+
+                        # Smart filter for site settings: only index script-bearing or tracking settings
+                        if table in ("adx_sitesettings", "mspp_sitesettings"):
+                            s_name_low = rec_name.lower()
+                            c_text_low = code_text.lower()
+                            is_script_setting = (
+                                "tracking" in s_name_low
+                                or "header" in s_name_low
+                                or "footer" in s_name_low
+                                or "script" in s_name_low
+                                or "javascript" in s_name_low
+                                or "<script" in c_text_low
+                                or "/_api/" in c_text_low
+                                or "webapi" in c_text_low
+                                or "function" in c_text_low
+                            )
+                            if not is_script_setting:
+                                continue
+
+                        helper_map = self._extract_query_helper_functions(code_text)
+                        if helper_map:
+                            query_func_registry.update(helper_map)
+
+                        all_code_blocks.append({
+                            "rec_id": rec_id,
+                            "rec_name": rec_name,
+                            "web_id": web_id,
+                            "table": table,
+                            "col": col,
+                            "comp_type": comp_type,
+                            "code_text": code_text,
+                        })
+
         # Pass 1B: Automatically discover custom Web API wrapper functions across all templates/components
         discovered_wrappers = self._discover_webapi_wrapper_functions(all_code_blocks)
-        logger.debug("Pre-indexed %d query helper functions: %s", len(query_func_registry), list(query_func_registry.keys()))
-        logger.debug("Discovered %d custom Web API wrappers: %s", len(discovered_wrappers), sorted(list(discovered_wrappers)))
+        dbg_log.write(f"Pre-indexed {len(query_func_registry)} query helper functions: {list(query_func_registry.keys())}\n")
+        dbg_log.write(f"Discovered {len(discovered_wrappers)} custom Web API wrappers: {sorted(list(discovered_wrappers))}\n")
 
         # Exclude common English stop words and generic CRM system attributes from fuzzy matching
         common_stop_words = {
@@ -918,7 +1259,7 @@ class PortalWebApiAuditorClient:
                     })
                     occurrences.append(hit)
                     parsed_tables_in_comp.add(hit["table_name"])
-                    logger.debug("  [WEBAPI HIT] %s in %s '%s': fields=%s", hit['table_name'], comp_type, rec_name, hit['fields'])
+                    dbg_log.write(f"  [WEBAPI HIT] {hit['table_name']} in {comp_type} '{rec_name}': fields={hit['fields']}\n")
 
             # B. Extract FetchXML queries (<entity name="..."> <link-entity name="...">)
             fx_hits = self._extract_fetchxml_usage(code_text, allowed_tables=known_tbl_set)
@@ -1002,9 +1343,14 @@ class PortalWebApiAuditorClient:
                                             for m_attr in re.finditer(r'\b(' + re.escape(attr) + r')\b', code_for_fuzzy, re.IGNORECASE):
                                                 matched_fields.add(m_attr.group(1))
 
-                                is_client_js = any(x in col.lower() for x in ("customjavascript", "registerstartupscript", "registercustomjavascript")) or "web file" in comp_type.lower() or "script" in comp_type.lower()
+                                is_client_js = (
+                                    any(x in col.lower() for x in ("customjavascript", "registerstartupscript", "registercustomjavascript"))
+                                    or "web file" in comp_type.lower()
+                                    or "script" in comp_type.lower()
+                                    or (comp_type == "Web Template" and any(m in raw_snip_block.lower() for m in ("<script", "function", "$.ajax", "webapi", "var ", "const ", "let ")))
+                                )
                                 ep_label = f"Client Script Reference to {tbl}" if is_client_js else f"Portal Template / Code Reference to {tbl}"
-                                comp_label = f"{comp_type} Script" if is_client_js and "script" not in comp_type.lower() else comp_type
+                                comp_label = f"{comp_type} (Client Script)" if is_client_js and "script" not in comp_type.lower() else comp_type
 
                                 occurrences.append({
                                     "raw_endpoint": ep_label,
@@ -1019,6 +1365,7 @@ class PortalWebApiAuditorClient:
                                     "table_source": table,
                                     "field_source": col,
                                     "website_id": web_id or website_id or "",
+                                    "is_client_js": is_client_js,
                                 })
                                 break  # Record one occurrence per component per table
 
@@ -1035,7 +1382,7 @@ class PortalWebApiAuditorClient:
                 q += f"&$filter={site_col} eq {website_id} or {site_col} eq null"
 
             wf_rows = self._fetch_all_pages(q, max_pages=20)
-            logger.debug("Target: %s -> fetched %d web files", tbl_webfiles, len(wf_rows))
+            dbg_log.write(f"Target: {tbl_webfiles} -> fetched {len(wf_rows)} web files\n")
 
             for wf in wf_rows:
                 w_name = (wf.get(name_col) or "").lower()
@@ -1122,7 +1469,7 @@ class PortalWebApiAuditorClient:
                                                 for m_attr in re.finditer(r'\b(' + re.escape(attr) + r')\b', decoded_js, re.IGNORECASE):
                                                     matched_fields.add(m_attr.group(1))
 
-                                    logger.debug("  [WEB FILE HIT] %s in '%s' (fn='%s'): fields=%s", tbl, w_name, fn, sorted(list(matched_fields), key=lambda x: (x.lower(), x)))
+                                    dbg_log.write(f"  [WEB FILE HIT] {tbl} in '{w_name}' (fn='{fn}'): fields={sorted(list(matched_fields), key=lambda x: (x.lower(), x))}\n")
                                     occurrences.append({
                                         "raw_endpoint": f"Web File JS Reference to {tbl}",
                                         "table_name": tbl,
@@ -1200,7 +1547,16 @@ class PortalWebApiAuditorClient:
             for tbl_occs in implicit.values():
                 occurrences.extend(tbl_occs)
 
-        logger.debug("Total occurrences found: %d", len(occurrences))
+        try:
+            dbg_log.write(f"\nTotal occurrences found: {len(occurrences)}\n")
+            counts_by_tbl = {}
+            for o in occurrences:
+                counts_by_tbl[o["table_name"]] = counts_by_tbl.get(o["table_name"], 0) + 1
+            for t, cnt in sorted(counts_by_tbl.items()):
+                dbg_log.write(f"  Table '{t}': {cnt} occurrences\n")
+            dbg_log.close()
+        except Exception:
+            pass
 
         return occurrences
 
@@ -1214,6 +1570,10 @@ class PortalWebApiAuditorClient:
         "Entity List (Portal)",
         "Portal Lookup Control",
         "Dynamic UI Catalog",
+        "Basic Form (Embedded Subgrid)",
+        "Multistep Form Step (Embedded Subgrid)",
+        "Basic Form (Form XML)",
+        "Multistep Form Step (Form XML)",
     }
 
     @staticmethod
@@ -1504,6 +1864,10 @@ class PortalWebApiAuditorClient:
           ✗ Standard Basic Forms / Multistep Forms / Entity Lists (no OData)
           ✗ Fuzzy text-mention matches ("Portal Template / Code Reference")
         """
+        # Explicit tag from _parse_code_for_webapi_calls
+        if occ.get("is_webapi"):
+            return True
+
         raw_ep = (occ.get("raw_endpoint") or "").lower()
         comp_type = (occ.get("component_type") or "")
 
@@ -1525,7 +1889,7 @@ class PortalWebApiAuditorClient:
             return True
 
         # SDK wrapper calls (webAPI.retrieveRecord, Xrm.WebApi, PortalAPI, safeAjax, and discovered wrappers)
-        standard_wrappers = {".webapi", "xrm.webapi", "portalapi", "safeajax"}
+        standard_wrappers = {".webapi", "webapi.", "webapi", "xrm.webapi", "portalapi", "safeajax"}
         all_wrappers = standard_wrappers | PortalWebApiAuditorClient._DISCOVERED_WRAPPERS
         if any(t in raw_ep for t in all_wrappers):
             return True
@@ -1539,10 +1903,11 @@ class PortalWebApiAuditorClient:
             return True
 
         # Client-side JavaScript references: code in registercustomjavascript, customjavascript,
-        # Web Files, or any component originating from client script
+        # Web Files, Web Templates with client script, or any component originating from client script
         field_src = (occ.get("field_source") or "").lower()
         if (
-            "customjavascript" in field_src
+            occ.get("is_client_js")
+            or "customjavascript" in field_src
             or "registerstartupscript" in field_src
             or "registercustomjavascript" in field_src
             or "web file" in comp_type.lower()
@@ -1578,7 +1943,7 @@ class PortalWebApiAuditorClient:
         result: dict[str, list[dict]] = {t: [] for t in known_tables}
         known_set = set(known_tables)
 
-        # --- Signal 1: Entity List OData Feed ---
+        # --- Signal 1: Entity List OData Feed & Portal Views ---
         for schema in ["adx", "mspp"]:
             el_tbl = f"{schema}_entitylists"
             id_col = f"{schema}_entitylistid"
@@ -1586,12 +1951,19 @@ class PortalWebApiAuditorClient:
             ent_col = f"{schema}_entityname"
             odata_col = f"{schema}_odata_enabled"
             site_col = f"_{schema}_websiteid_value"
+            views_col = f"{schema}_views"
 
-            query = f"{el_tbl}?$select={id_col},{name_col},{ent_col},{odata_col},{site_col}"
+            query = f"{el_tbl}?$select={id_col},{name_col},{ent_col},{odata_col},{site_col},{views_col}"
             if website_id:
                 query += f"&$filter={site_col} eq {website_id}"
 
             rows = self._fetch_all_pages(query, max_pages=10)
+            if not rows:
+                fallback_query = f"{el_tbl}?$select={id_col},{name_col},{ent_col},{odata_col},{site_col}"
+                if website_id:
+                    fallback_query += f"&$filter={site_col} eq {website_id}"
+                rows = self._fetch_all_pages(fallback_query, max_pages=10)
+
             for row in rows:
                 ent_name = (row.get(ent_col) or "").strip().lower()
                 if ent_name not in known_set:
@@ -1601,6 +1973,7 @@ class PortalWebApiAuditorClient:
                 list_name = row.get(name_col) or "Entity List"
                 list_id = row.get(id_col) or ""
                 web_id = row.get(site_col) or website_id or ""
+                raw_views = row.get(views_col) or ""
                 comp_type = "Entity List (OData Feed)" if odata_on else "Entity List (Portal)"
                 endpoint = (
                     f"/_api/entitylists('{list_id}')/entityrecords"
@@ -1608,7 +1981,13 @@ class PortalWebApiAuditorClient:
                     else f"/_api/{ent_name}s (implicit – portal list view)"
                 )
 
-                el_fields = [f for f in (table_fields_map or {}).get(ent_name, []) if f and f != "*"] or ["statecode", f"{ent_name}id", "name"]
+                # Extract real view columns from savedquery / layoutxml
+                view_fields = self.get_entity_list_view_fields(ent_name, raw_views)
+                if view_fields:
+                    el_fields = view_fields
+                else:
+                    el_fields = [f for f in (table_fields_map or {}).get(ent_name, []) if f and f != "*"] or ["statecode", f"{ent_name}id", "name"]
+
                 result[ent_name].append({
                     "raw_endpoint": endpoint,
                     "table_name": ent_name,
@@ -1624,9 +2003,62 @@ class PortalWebApiAuditorClient:
                     "component_name": list_name,
                     "component_id": list_id,
                     "table_source": el_tbl,
-                    "field_source": odata_col,
+                    "field_source": views_col if raw_views else odata_col,
                     "website_id": web_id,
                 })
+
+        # Enhanced Data Model: powerpagecomponents (type 18 = List / Entity List)
+        ppc_query = "powerpagecomponents?$filter=powerpagecomponenttype eq 18&$select=powerpagecomponentid,name,content,_powerpagesiteid_value"
+        if website_id:
+            ppc_query += f" and _powerpagesiteid_value eq {website_id}"
+        ppc_lists = self._fetch_all_pages(ppc_query, max_pages=10)
+        for r in ppc_lists:
+            content_raw = r.get("content") or "{}"
+            c_json = {}
+            if isinstance(content_raw, str):
+                try:
+                    c_json = json.loads(content_raw)
+                except Exception:
+                    pass
+            elif isinstance(content_raw, dict):
+                c_json = content_raw
+            ent_name = (c_json.get("adx_entityname") or c_json.get("entityname") or "").strip().lower()
+            if not ent_name or ent_name not in known_set:
+                continue
+            odata_on = bool(c_json.get("adx_odata_enabled") or c_json.get("odata_enabled"))
+            list_name = r.get("name") or c_json.get("adx_name") or "Entity List"
+            list_id = r.get("powerpagecomponentid") or ""
+            web_id = r.get("_powerpagesiteid_value") or website_id or ""
+            raw_views = c_json.get("adx_views") or c_json.get("views") or ""
+            comp_type = "Entity List (OData Feed)" if odata_on else "Entity List (Portal)"
+            endpoint = (
+                f"/_api/entitylists('{list_id}')/entityrecords"
+                if odata_on
+                else f"/_api/{ent_name}s (implicit – portal list view)"
+            )
+            view_fields = self.get_entity_list_view_fields(ent_name, raw_views)
+            if view_fields:
+                el_fields = view_fields
+            else:
+                el_fields = [f for f in (table_fields_map or {}).get(ent_name, []) if f and f != "*"] or ["statecode", f"{ent_name}id", "name"]
+            result[ent_name].append({
+                "raw_endpoint": endpoint,
+                "table_name": ent_name,
+                "table_raw": ent_name,
+                "fields": sorted(list(el_fields)),
+                "line_number": 1,
+                "context_snippet": (
+                    f"// Entity List: {list_name}\n"
+                    f"// OData Feed: {'Enabled — browser calls /_api/entitylists({list_id})/entityrecords' if odata_on else 'Disabled — portal list still issues column/filter lookups via Web API'}\n"
+                    f"// Web API site settings REQUIRED for column filtering and OData access to work."
+                ),
+                "component_type": comp_type,
+                "component_name": list_name,
+                "component_id": list_id,
+                "table_source": "powerpagecomponents",
+                "field_source": "powerpagecomponenttype_18",
+                "website_id": web_id,
+            })
 
         # --- Signal 2: Portal Forms & Multistep Steps with Custom Lookup Web API Coding or PCF Controls ---
         emitted_keys: set[tuple[str, str]] = set()
@@ -1709,6 +2141,33 @@ class PortalWebApiAuditorClient:
                                     "website_id": form.get(site_col) if site_col else (website_id or ""),
                                     "is_form_xml": True,
                                 })
+
+                        # 0b. Extract embedded subgrids from model-driven Form XML
+                        sub_targets = self.get_form_subgrid_entities(fent, mda_form)
+                        for sub_ent in sub_targets:
+                            if sub_ent in known_set:
+                                dedup_sub_k = (sub_ent, f"subgrid_{fid or fname}")
+                                if dedup_sub_k not in emitted_keys:
+                                    emitted_keys.add(dedup_sub_k)
+                                    result.setdefault(sub_ent, []).append({
+                                        "raw_endpoint": f"Subgrid on Form '{mda_form}' (Parent: {fent} -> Related: {sub_ent})",
+                                        "table_name": sub_ent,
+                                        "table_raw": sub_ent,
+                                        "fields": [f"{sub_ent}id", "statecode", "statuscode"],
+                                        "line_number": 1,
+                                        "context_snippet": (
+                                            f"// {comp_kind}: {fname} (Parent Table: {fent})\n"
+                                            f"// Embedded Subgrid Target Entity: '{sub_ent}'\n"
+                                            f"// Subgrids render related entity records and can invoke Web API queries if inline editing or custom JS is present."
+                                        ),
+                                        "component_type": f"{comp_kind} (Embedded Subgrid)",
+                                        "component_name": fname,
+                                        "component_id": fid or "",
+                                        "table_source": ef_tbl,
+                                        "field_source": "formxml_subgrid",
+                                        "website_id": form.get(site_col) if site_col else (website_id or ""),
+                                        "is_form_xml": True,
+                                    })
 
                     # 1. Check Form / Step Metadata for PCF Code Components or Custom Controls
                     if fid:
@@ -2371,6 +2830,29 @@ class PortalWebApiAuditorClient:
             re.IGNORECASE,
         )
 
+        # 1c. Cloud Flow Triggers: /_api/cloudflows/v1.0/trigger/<flow_id>
+        cloudflow_pattern = re.compile(
+            r"""(?:[/]_api[/]cloudflows[/]v1\.0[/]trigger[/]([a-zA-Z0-9_-]+))""",
+            re.IGNORECASE,
+        )
+        for cf_match in cloudflow_pattern.finditer(code):
+            flow_id = cf_match.group(1).strip()
+            line_num = code[:cf_match.start()].count("\n") + 1
+            results.append({
+                "raw_endpoint": f"/_api/cloudflows/v1.0/trigger/{flow_id}",
+                "table_name": "cloudflows",
+                "table_raw": f"cloudflows/v1.0/trigger/{flow_id}",
+                "fields": [],
+                "is_unprojected": False,
+                "unprojected_reason": "",
+                "line_number": line_num,
+                "context_snippet": "\n".join(lines[max(0, line_num - 2):min(len(lines), line_num + 3)]),
+                "is_webapi": True,
+                "is_client_js": True,
+                "is_cloudflow": True,
+                "cloudflow_id": flow_id,
+            })
+
         # 1b. Direct client-side Web API FetchXML query (e.g. `contacts?fetchXml=<fetch ...>`, `/_api/contacts?fetchXml=...`)
         client_fetchxml_pattern = re.compile(
             r"""(?:[/]_api[/]|[`'"])?([a-zA-Z0-9_]{3,60})\?fetchXml=\s*[`'"]?(<fetch\b.*?<\/fetch>)""",
@@ -2466,8 +2948,16 @@ class PortalWebApiAuditorClient:
                 fields_found.update(payload_fields)
                 fields_found.update(self._extract_response_fields(context_block))
 
+                action_name = ""
+                if "microsoft.dynamics.crm." in query_part.lower():
+                    act_m = re.search(r"""(?:Microsoft\.Dynamics\.CRM\.)([a-zA-Z0-9_]+)""", query_part, re.IGNORECASE)
+                    if act_m:
+                        action_name = act_m.group(1)
+
                 endpoint_name = match.group(0)
-                if not endpoint_name.startswith("/_api/"):
+                if action_name:
+                    endpoint_name = f"/_api/{table_raw}(...)/Microsoft.Dynamics.CRM.{action_name}"
+                elif not endpoint_name.startswith("/_api/"):
                     endpoint_name = f"OData Query: {table_raw}"
 
                 query_analysis = self._analyze_odata_query(query_part or resolved_line)
@@ -2503,6 +2993,7 @@ class PortalWebApiAuditorClient:
                     "unprojected_reason": unproj_reason,
                     "line_number": line_idx,
                     "context_snippet": "\n".join(lines[max(0, line_idx - 2):min(len(lines), line_idx + 3)]),
+                    "action_name": action_name if action_name else None,
                 })
 
             # Gap 2 fix: scan for fetch/axios/$.ajax/XHR calls to /_api/
@@ -2510,6 +3001,12 @@ class PortalWebApiAuditorClient:
                 full_url = match.group(1).strip()
                 table_raw = match.group(2).strip()
                 logical_table = self.resolve_entity_name(table_raw)
+
+                action_name = ""
+                if "microsoft.dynamics.crm." in full_url.lower():
+                    act_m = re.search(r"""(?:Microsoft\.Dynamics\.CRM\.)([a-zA-Z0-9_]+)""", full_url, re.IGNORECASE)
+                    if act_m:
+                        action_name = act_m.group(1)
 
                 start_l = max(0, line_idx - 30)
                 end_l = min(len(lines), line_idx + 15)
@@ -2569,8 +3066,10 @@ class PortalWebApiAuditorClient:
                 is_unproj = query_analysis["is_unprojected"] and not is_write_method
                 unproj_reason = query_analysis.get("unprojected_reason", "") if is_unproj else ""
 
+                ep_label = f"/_api/{table_raw}(...)/Microsoft.Dynamics.CRM.{action_name}" if action_name else f"/_api/{table_raw} (HTTP client call)"
+
                 results.append({
-                    "raw_endpoint": f"/_api/{table_raw} (HTTP client call)",
+                    "raw_endpoint": ep_label,
                     "table_name": logical_table,
                     "table_raw": table_raw,
                     "fields": sorted(list(f for f in fields_found if f and f != "*"), key=lambda x: (x.lower(), x)),
@@ -2578,6 +3077,7 @@ class PortalWebApiAuditorClient:
                     "unprojected_reason": unproj_reason,
                     "line_number": line_idx,
                     "context_snippet": "\n".join(lines[max(0, line_idx - 2):min(len(lines), line_idx + 3)]),
+                    "action_name": action_name if action_name else None,
                 })
 
         # 2. SDK / PCF / Helper wrapper pattern:
@@ -2847,6 +3347,9 @@ class PortalWebApiAuditorClient:
                     })
 
 
+        for r in results:
+            r["is_webapi"] = True
+
         return results
 
     def _extract_payload_fields(self, code_block: str) -> set[str]:
@@ -2855,7 +3358,7 @@ class PortalWebApiAuditorClient:
         e.g. data: JSON.stringify({ "emailaddress1": email, firstname: "John", "new_score": 100 })
         or: var record = { new_name: "test" }; ... data: JSON.stringify(record)
         Preserves exact casing of property keys (such as OData @odata.bind navigation property SchemaNames
-        like "app_Candidate@odata.bind" -> "app_Candidate").
+        like "crimson_Student@odata.bind" -> "crimson_Student").
         """
         found = set()
         skip_words = {
@@ -2898,8 +3401,8 @@ class PortalWebApiAuditorClient:
                 k_low = k_raw.lower()
                 if k_raw and k_low not in skip_words and not k_low.isdigit() and not self._is_guid_or_hex_fragment(k_low):
                     found.add(k_raw)
-                    if k_raw != k_low:
-                        found.add(k_low)
+                    if "@odata.bind" in stringify_content:
+                        found.add(f"_{k_low}_value")
             search_pos = (end_paren + 1) if end_paren != -1 else (start_paren + 1)
 
         # 2. Look for variable passed to JSON.stringify(recordVar)
@@ -2927,8 +3430,8 @@ class PortalWebApiAuditorClient:
                     k_low = k_raw.lower()
                     if k_raw and k_low not in skip_words and not k_low.isdigit() and not self._is_guid_or_hex_fragment(k_low):
                         found.add(k_raw)
-                        if k_raw != k_low:
-                            found.add(k_low)
+                        if "@odata.bind" in var_content or "@odata.bind" in code_block:
+                            found.add(f"_{k_low}_value")
 
             # Also look for property assignments: recordVar.prop = ... or recordVar['prop'] = ...
             prop_pattern = re.compile(
@@ -2940,8 +3443,6 @@ class PortalWebApiAuditorClient:
                 p_low = p_raw.lower()
                 if p_raw and p_low not in skip_words and not p_low.isdigit() and not self._is_guid_or_hex_fragment(p_low):
                     found.add(p_raw)
-                    if p_raw != p_low:
-                        found.add(p_low)
 
         return found
 
@@ -2998,6 +3499,13 @@ class PortalWebApiAuditorClient:
             if prop not in skip_words and not prop.isdigit() and not self._is_guid_or_hex_fragment(prop):
                 found.add(prop)
 
+        # 6. Direct detection of Dataverse lookup navigation properties: _<lookup>_value anywhere in code
+        # (e.g. booking._crimson_interviewee_value, slot['_crimson_interviewee_value'], _crimson_interviewee_value)
+        for m in re.finditer(r"""\b_([a-zA-Z0-9_]{2,50})_value\b""", code_block, re.IGNORECASE):
+            full_lookup = f"_{m.group(1).strip().lower()}_value"
+            if full_lookup not in skip_words and not self._is_guid_or_hex_fragment(full_lookup):
+                found.add(full_lookup)
+
         return found
 
     # ------------------------------------------------------------------
@@ -3028,8 +3536,13 @@ class PortalWebApiAuditorClient:
         elif site_settings:
             tables = [st.get("setting_table") for st in site_settings if st.get("setting_table")]
             if tables:
-                target_schema = "mspp" if "mspp" in max(set(tables), key=tables.count) else "adx"
-        default_setting_table = f"{target_schema}_sitesettings" if target_schema else "adx_sitesettings"
+                if any("powerpage" in str(t) for t in tables):
+                    target_schema = "powerpage"
+                elif any("mspp" in str(t) for t in tables):
+                    target_schema = "mspp"
+                else:
+                    target_schema = "adx"
+        default_setting_table = "powerpagecomponents" if target_schema == "powerpage" else (f"{target_schema}_sitesettings" if target_schema else "adx_sitesettings")
 
         # Map detected fields by table_name — governed occurrences ONLY
         # (Only /_api/ calls, SDK wrappers, PCF, Entity List OData, Lookup Controls
@@ -3085,20 +3598,50 @@ class PortalWebApiAuditorClient:
             framework_occs = [o for o in governed_occs if o.get("component_type") in self.FRAMEWORK_COMPONENT_TYPES]
             custom_code_occs = [o for o in governed_occs if o.get("component_type") not in self.FRAMEWORK_COMPONENT_TYPES]
 
-            # Resolve table attributes from Dataverse metadata only if there are fields to validate
+            # Resolve table attributes from Dataverse metadata
             logical_tbl = self.resolve_entity_name(tbl)
             raw_disc = detected_by_table.get(tbl, set())
-            filtered_disc = self.filter_table_attributes(list(raw_disc))
 
             valid_attr_set = set()
-            if filtered_disc:
-                tbl_attrs = self.get_table_attributes(logical_tbl)
-                if not tbl_attrs and logical_tbl != tbl:
-                    tbl_attrs = self.get_table_attributes(tbl)
-                if tbl_attrs:
-                    valid_attr_set = set(a.lower() for a in tbl_attrs)
-                    valid_attr_set.add(f"{tbl}id".lower())
-                    filtered_disc = [f for f in filtered_disc if f.lower() in valid_attr_set]
+            tbl_attrs = self.get_table_attributes(logical_tbl)
+            if not tbl_attrs and logical_tbl != tbl:
+                tbl_attrs = self.get_table_attributes(tbl)
+            if tbl_attrs:
+                valid_attr_set = set(a.lower() for a in tbl_attrs)
+                valid_attr_set.add(f"{tbl}id".lower())
+                valid_attr_set.add(f"{logical_tbl}id".lower())
+
+            lookup_map = getattr(self, "_lookup_schema_map", {}).get(logical_tbl, {})
+            if not lookup_map and logical_tbl != tbl:
+                lookup_map = getattr(self, "_lookup_schema_map", {}).get(tbl, {})
+
+            # Auto-expand lookup attributes in discovered code fields:
+            # Power Pages Web API lookups have two representations:
+            # 1. Write / Bind SchemaName (e.g. crimson_Interviewee or crimson_interviewee)
+            # 2. Read Single-Valued Navigation Property (e.g. _crimson_interviewee_value)
+            # Both represent the exact same relationship and both are required for complete Web API functionality.
+            expanded_raw_disc = set(raw_disc)
+            for f in list(raw_disc):
+                fl = f.lower()
+                if fl.startswith("_") and fl.endswith("_value") and fl[1:-6] in lookup_map:
+                    s_name, l_name = lookup_map[fl[1:-6]]
+                    expanded_raw_disc.add(s_name)
+                    expanded_raw_disc.add(l_name)
+                elif fl in lookup_map:
+                    s_name, l_name = lookup_map[fl]
+                    expanded_raw_disc.add(f"_{l_name}_value")
+                    expanded_raw_disc.add(s_name)
+                elif fl.endswith("id") and fl[:-2] in lookup_map:
+                    s_name, l_name = lookup_map[fl[:-2]]
+                    expanded_raw_disc.add(f"_{l_name}_value")
+                    expanded_raw_disc.add(s_name)
+                    expanded_raw_disc.add(l_name)
+                elif f"_{fl}_value" in valid_attr_set:
+                    expanded_raw_disc.add(f"_{fl}_value")
+
+            filtered_disc = self.filter_table_attributes(list(expanded_raw_disc))
+            if valid_attr_set:
+                filtered_disc = [f for f in filtered_disc if f.lower() in valid_attr_set]
 
             discovered_fields = sorted(list(f for f in filtered_disc if f and f != "*"), key=lambda x: (x.lower(), x))
             governed_count = len(governed_occs)
@@ -3115,15 +3658,34 @@ class PortalWebApiAuditorClient:
             website_id = s.get("website_id", "") if s else (target_website_id or "")
 
             # Check missing fields — only from fields detected in governed calls.
-            # NOTE: Lookup Navigation Properties in @odata.bind (e.g., app_Candidate)
-            # are case-sensitive in Power Pages Web API and require exact SchemaName match
-            # in Webapi/<table>/fields, whereas standard lowercase logical names match case-insensitively.
+            # Handles lookup pairing: if either the OData navigation property (_<lookup>_value)
+            # or the entity lookup attribute (e.g. crimson_Interviewee / crimson_interviewee) is
+            # configured in the whitelist, the lookup column access is satisfied.
             missing_from_whitelist = []
             if not has_wildcard and configured_fields:
                 configured_lower_set = {c.lower() for c in configured_fields}
+
+                def is_field_whitelisted(fld: str) -> bool:
+                    fld_low = fld.lower()
+                    if fld_low in configured_lower_set:
+                        return True
+                    if fld_low.startswith("_") and fld_low.endswith("_value"):
+                        base = fld_low[1:-6]
+                        if base in configured_lower_set:
+                            return True
+                        if lookup_map and base in lookup_map and lookup_map[base][0].lower() in configured_lower_set:
+                            return True
+                    elif fld_low in lookup_map:
+                        _, l_name = lookup_map[fld_low]
+                        if f"_{l_name}_value".lower() in configured_lower_set:
+                            return True
+                    elif f"_{fld_low}_value" in configured_lower_set:
+                        return True
+                    return False
+
                 missing_from_whitelist = [
                     f for f in discovered_fields
-                    if (f not in configured_fields if f != f.lower() else f.lower() not in configured_lower_set)
+                    if not is_field_whitelisted(f)
                 ]
             elif not has_wildcard and not configured_fields and discovered_fields:
                 missing_from_whitelist = list(discovered_fields)
@@ -3223,7 +3785,7 @@ class PortalWebApiAuditorClient:
                     )
 
             # Recommended fields computation:
-            # Separate fields by source tier (preserving mixed-case SchemaNames where present):
+            # Separate fields by source tier while preserving mixed-case SchemaNames:
             valid_existing = set(f for f in configured_fields if f and f != "*")
             valid_discovered = set(f for f in discovered_fields if f and f != "*")
             existing_mixed_by_lower = {f.lower(): f for f in valid_existing if f != f.lower()}
@@ -3313,21 +3875,41 @@ class PortalWebApiAuditorClient:
                             server_fields.add(attr)
                     all_table_fields_added = True
 
-            # Also preserve any mixed-case SchemaNames already configured in site settings
-            # and ensure lookup SchemaNames discovered from metadata are added alongside logical names
-            table_lookup_map = self._table_lookup_schema_map.get(logical_tbl) or self._table_lookup_schema_map.get(tbl) or {}
-            for tier_set in (strict_fields, form_fields, server_fields):
-                for low_k, mixed_v in existing_mixed_by_lower.items():
-                    if any(x.lower() == low_k for x in tier_set):
-                        tier_set.add(mixed_v)
-                        tier_set.add(low_k)
-                for low_k, schema_v in table_lookup_map.items():
-                    if any(x.lower() == low_k for x in tier_set):
-                        tier_set.add(schema_v)
-                        tier_set.add(low_k)
+            # Preserve any existing mixed-case SchemaNames from configured_fields when the same attribute is present
+            if existing_mixed_by_lower:
+                for tier_set in (strict_fields, form_fields, server_fields):
+                    for f in list(tier_set):
+                        if f.lower() in existing_mixed_by_lower:
+                            tier_set.add(existing_mixed_by_lower[f.lower()])
+
+            # If code/form references a lookup (by logical name, schema name, 'id' suffix, or _<name>_value),
+            # ensure BOTH the exact Dataverse SchemaName (e.g. crimson_Interviewee) and the OData read property
+            # (_crimson_interviewee_value) are included in all recommendation tiers.
+            lookup_map = getattr(self, "_lookup_schema_map", {}).get(logical_tbl, {})
+            if not lookup_map and logical_tbl != tbl:
+                lookup_map = getattr(self, "_lookup_schema_map", {}).get(tbl, {})
+
+            if lookup_map:
+                for tier_set in (strict_fields, form_fields, server_fields):
+                    for f in list(tier_set):
+                        f_low = f.lower()
+                        if f_low.startswith("_") and f_low.endswith("_value") and f_low[1:-6] in lookup_map:
+                            s_name, l_name = lookup_map[f_low[1:-6]]
+                            tier_set.add(s_name)
+                            tier_set.add(f"_{l_name}_value")
+                        elif f_low in lookup_map:
+                            s_name, l_name = lookup_map[f_low]
+                            tier_set.add(s_name)
+                            tier_set.add(f"_{l_name}_value")
+                        elif f_low.endswith("id") and f_low[:-2] in lookup_map:
+                            s_name, l_name = lookup_map[f_low[:-2]]
+                            tier_set.add(s_name)
+                            tier_set.add(f"_{l_name}_value")
+                        elif f"_{f_low}_value" in valid_attr_set:
+                            tier_set.add(f"_{f_low}_value")
 
             # Clean fields through filter_table_attributes to remove virtual fields and non-field noise tokens
-            # (filter_table_attributes preserves both lowercase Logical Names and mixed-case Schema Names)
+            # (filter_table_attributes deduplicates case-insensitively while preferring mixed-case SchemaNames)
             filtered_strict = set(self.filter_table_attributes(list(strict_fields)))
             filtered_form = set(self.filter_table_attributes(list(form_fields)))
             filtered_server = set(self.filter_table_attributes(list(server_fields)))
@@ -3373,8 +3955,9 @@ class PortalWebApiAuditorClient:
 
             for occ in occ_list:
                 if occ.get("is_unprojected") and self._is_webapi_governed(occ):
-                    occ["suggested_fields"] = sorted(list(active_fields), key=lambda x: (x.lower(), x))
-                    sug_cols = ",".join(sorted(active_fields, key=lambda x: (x.lower(), x)))
+                    sorted_active = sorted(list(active_fields), key=lambda x: (x.lower(), x))
+                    occ["suggested_fields"] = sorted_active
+                    sug_cols = ",".join(sorted_active)
                     raw_ep = occ.get("raw_endpoint", "")
                     if "/_api/" in raw_ep:
                         url_part = raw_ep.split("/_api/", 1)[1].split()[0].rstrip("`'\"")
@@ -3438,9 +4021,42 @@ class PortalWebApiAuditorClient:
         self, setting_table: str, setting_id: str, new_fields_value: str
     ) -> bool:
         """
-        PATCH the adx_sitesettings or mspp_sitesettings record with the new
+        PATCH the adx_sitesettings, mspp_sitesettings, or powerpagecomponents record with the new
         explicit comma-separated fields whitelist.
         """
+        if setting_table == "powerpagecomponents":
+            url = f"{self.org_url}/api/data/v9.2/powerpagecomponents({setting_id})"
+            content_dict: dict = {}
+            name_val = ""
+            try:
+                res_get = requests.get(f"{url}?$select=content,name", headers=self.headers, timeout=30)
+                if res_get.ok:
+                    data = res_get.json()
+                    name_val = data.get("name") or ""
+                    c_raw = data.get("content") or "{}"
+                    if isinstance(c_raw, str):
+                        content_dict = json.loads(c_raw)
+                    elif isinstance(c_raw, dict):
+                        content_dict = c_raw
+            except Exception:
+                pass
+
+            content_dict["value"] = new_fields_value.strip()
+            content_dict["adx_value"] = new_fields_value.strip()
+            payload: dict = {"content": json.dumps(content_dict)}
+            if name_val:
+                payload["name"] = name_val
+
+            headers = dict(self.headers)
+            headers["Content-Type"] = "application/json; charset=utf-8"
+            headers["If-Match"] = "*"
+            res = requests.patch(url, headers=headers, json=payload, timeout=30)
+            if not res.ok:
+                err_msg = f"HTTP {res.status_code} {res.reason}: {res.text[:300]}"
+                logger.error("Failed updating powerpagecomponent %s: %s", setting_id, err_msg)
+                raise Exception(err_msg)
+            return True
+
         url = f"{self.org_url}/api/data/v9.2/{setting_table}({setting_id})"
         schema = "mspp" if "mspp" in setting_table else "adx"
         val_col = f"{schema}_value"
@@ -3469,8 +4085,47 @@ class PortalWebApiAuditorClient:
     ) -> Tuple[bool, str]:
         """
         Create Webapi/<table_name>/enabled and Webapi/<table_name>/fields site settings
-        if they do not already exist.
+        if they do not already exist, across powerpagecomponents, adx, or mspp.
         """
+        if setting_table == "powerpagecomponents":
+            base_url = f"{self.org_url}/api/data/v9.2/powerpagecomponents"
+            headers = dict(self.headers)
+            headers["Content-Type"] = "application/json; charset=utf-8"
+
+            # 1. Enabled setting
+            enabled_name = f"Webapi/{table_name}/enabled"
+            enabled_payload = {
+                "name": enabled_name,
+                "powerpagecomponenttype": 9,
+                "content": json.dumps({"name": enabled_name, "value": "true", "adx_value": "true"}),
+                "powerpagesiteid@odata.bind": f"/powerpagesites({website_id})",
+            }
+            res1 = requests.post(base_url, headers=headers, json=enabled_payload, timeout=30)
+            if not res1.ok and res1.status_code != 412:
+                try:
+                    err_text = res1.json().get("error", {}).get("message", res1.text[:200])
+                except Exception:
+                    err_text = res1.text[:200]
+                return False, f"Failed creating enabled setting in Power Pages: {err_text}"
+
+            # 2. Fields setting
+            fields_name = f"Webapi/{table_name}/fields"
+            fields_payload = {
+                "name": fields_name,
+                "powerpagecomponenttype": 9,
+                "content": json.dumps({"name": fields_name, "value": fields_value.strip(), "adx_value": fields_value.strip()}),
+                "powerpagesiteid@odata.bind": f"/powerpagesites({website_id})",
+            }
+            res2 = requests.post(base_url, headers=headers, json=fields_payload, timeout=30)
+            if not res2.ok:
+                try:
+                    err_text = res2.json().get("error", {}).get("message", res2.text[:200])
+                except Exception:
+                    err_text = res2.text[:200]
+                return False, f"Failed creating fields setting in Power Pages: {err_text}"
+
+            return True, "Successfully created and configured Web API site settings in Power Pages."
+
         schema = "mspp" if "mspp" in setting_table else "adx"
         name_col = f"{schema}_name"
         val_col = f"{schema}_value"
@@ -3550,33 +4205,105 @@ class PortalWebApiAuditorClient:
         }
 
         # 1. Site settings — scoped to selected website & schema, with cross-portal detection
-        for schema in ["adx", "mspp"]:
-            query = (
-                f"{schema}_sitesettings?$filter=contains({schema}_name, '{t_clean}')"
-                f"&$select={schema}_sitesettingid,{schema}_name,{schema}_value,_{schema}_websiteid_value"
-            )
-            ss = self._odata_get(query)
-            if ss and ss.get("value"):
-                for row in ss["value"]:
-                    row_site_id = row.get(f"_{schema}_websiteid_value") or ""
-                    row_site_name = self._website_name_cache.get(row_site_id) or (
-                        "Enhanced Portal (mspp)" if schema == "mspp" else "Standard Portal (adx)"
-                    )
-                    item = {
-                        "name": row.get(f"{schema}_name"),
-                        "value": row.get(f"{schema}_value"),
-                        "id": row.get(f"{schema}_sitesettingid"),
-                        "table": f"{schema}_sitesettings",
-                        "website_id": row_site_id,
-                        "portal_name": row_site_name,
-                    }
-                    if website_id:
-                        if row_site_id == website_id and schema == target_schema:
-                            context["site_settings"].append(item)
+        if target_schema == "powerpage":
+            ppc_q = f"powerpagecomponents?$filter=_powerpagesiteid_value eq {website_id}&$select=powerpagecomponentid,name,powerpagecomponenttype,content,_powerpagesiteid_value"
+            ppc_rows = self._fetch_all_pages(ppc_q, max_pages=20)
+            for r in ppc_rows:
+                cid = r.get("powerpagecomponentid") or ""
+                cname = (r.get("name") or "").strip()
+                ctype = r.get("powerpagecomponenttype")
+                craw = r.get("content") or "{}"
+                cjson = {}
+                if isinstance(craw, str):
+                    try:
+                        cjson = json.loads(craw)
+                    except Exception:
+                        pass
+                elif isinstance(craw, dict):
+                    cjson = craw
+
+                if ctype in (9, 27) and f"/{t_clean}/" in cname.lower():
+                    context["site_settings"].append({
+                        "name": cname,
+                        "value": cjson.get("value") or cjson.get("adx_value") or "",
+                        "id": cid,
+                        "table": "powerpagecomponents",
+                        "website_id": website_id,
+                        "portal_name": self._website_name_cache.get(website_id, "Power Pages Site"),
+                    })
+                elif ctype == 15:
+                    ent = (cjson.get("entityname") or cjson.get("adx_entityname") or "").strip().lower()
+                    if ent == t_clean:
+                        mda_fname = cjson.get("formname") or cjson.get("adx_formname") or ""
+                        mda_fields = self.get_form_fields_by_name(t_clean, mda_fname) if mda_fname else []
+                        context["basic_forms"].append({
+                            "id": cid,
+                            "name": cname,
+                            "mode": cjson.get("mode") or cjson.get("adx_mode"),
+                            "form_name": mda_fname,
+                            "form_fields": mda_fields,
+                            "table": "powerpagecomponents",
+                        })
+                elif ctype == 19:
+                    ent = (cjson.get("targetentitylogicalname") or cjson.get("adx_targetentitylogicalname") or "").strip().lower()
+                    if ent == t_clean:
+                        mda_fname = cjson.get("formname") or cjson.get("adx_formname") or ""
+                        mda_fields = self.get_form_fields_by_name(t_clean, mda_fname) if mda_fname else []
+                        context["multistep_steps"].append({
+                            "id": cid,
+                            "name": cname,
+                            "type": cjson.get("type") or cjson.get("adx_type"),
+                            "form_name": mda_fname,
+                            "form_fields": mda_fields,
+                            "table": "powerpagecomponents",
+                        })
+                elif ctype == 21:
+                    ent = (cjson.get("entityname") or cjson.get("adx_entityname") or "").strip().lower()
+                    if ent == t_clean:
+                        context["entity_lists"].append({
+                            "id": cid,
+                            "name": cname,
+                            "table": "powerpagecomponents",
+                        })
+                elif ctype == 18:
+                    ent = (cjson.get("entityname") or cjson.get("adx_entityname") or "").strip().lower()
+                    if ent == t_clean:
+                        context["table_permissions"].append({
+                            "name": cname,
+                            "id": cid,
+                            "read": cjson.get("read") or cjson.get("adx_read"),
+                            "write": cjson.get("write") or cjson.get("adx_write"),
+                            "create": cjson.get("create") or cjson.get("adx_create"),
+                            "table": "powerpagecomponents",
+                        })
+        else:
+            for schema in ["adx", "mspp"]:
+                query = (
+                    f"{schema}_sitesettings?$filter=contains({schema}_name, '{t_clean}')"
+                    f"&$select={schema}_sitesettingid,{schema}_name,{schema}_value,_{schema}_websiteid_value"
+                )
+                ss = self._odata_get(query)
+                if ss and ss.get("value"):
+                    for row in ss["value"]:
+                        row_site_id = row.get(f"_{schema}_websiteid_value") or ""
+                        row_site_name = self._website_name_cache.get(row_site_id) or (
+                            "Enhanced Portal (mspp)" if schema == "mspp" else "Standard Portal (adx)"
+                        )
+                        item = {
+                            "name": row.get(f"{schema}_name"),
+                            "value": row.get(f"{schema}_value"),
+                            "id": row.get(f"{schema}_sitesettingid"),
+                            "table": f"{schema}_sitesettings",
+                            "website_id": row_site_id,
+                            "portal_name": row_site_name,
+                        }
+                        if website_id:
+                            if row_site_id == website_id and schema == target_schema:
+                                context["site_settings"].append(item)
+                            else:
+                                context["cross_portal_site_settings"].append(item)
                         else:
-                            context["cross_portal_site_settings"].append(item)
-                    else:
-                        context["site_settings"].append(item)
+                            context["site_settings"].append(item)
 
         fields_val = ""
         for s in context["site_settings"]:
@@ -3587,7 +4314,7 @@ class PortalWebApiAuditorClient:
         context["catalog_role"] = self.detect_catalog_and_validation_role(t_clean, f_list)
 
         # 2. Basic Forms — query target schema and filter by website if specified
-        schemas_to_query = [target_schema] if target_schema else ["adx", "mspp"]
+        schemas_to_query = [target_schema] if target_schema in ("adx", "mspp") else (["adx", "mspp"] if not target_schema else [])
         for schema in schemas_to_query:
             filter_str = f"{schema}_entityname eq '{t_clean}'"
             if website_id:
@@ -3690,5 +4417,86 @@ class PortalWebApiAuditorClient:
             for occ in existing_code_occurrences:
                 if occ.get("table_name") == t_clean or occ.get("table_raw") == t_clean:
                     context["code_occurrences"].append(occ)
+
+        # 7b. On-demand scan of Web Templates for this table if no occurrences were found
+        # (guarantees Web Templates are scanned even before running a global Deep Scan)
+        if not context["code_occurrences"]:
+            try:
+                for schema in schemas_to_query:
+                    wt_tbl = f"{schema}_webtemplates"
+                    wt_id_col = f"{schema}_webtemplateid"
+                    wt_name_col = f"{schema}_name"
+                    wt_src_col = f"{schema}_source"
+                    wt_site_col = f"_{schema}_websiteid_value"
+
+                    wt_filter = []
+                    if website_id:
+                        wt_filter.append(f"({wt_site_col} eq {website_id} or {wt_site_col} eq null)")
+
+                    wt_query = f"{wt_tbl}?$select={wt_id_col},{wt_name_col},{wt_src_col}"
+                    if wt_filter:
+                        wt_query += f"&$filter={quote(' and '.join(wt_filter))}"
+
+                    wt_rows = self._fetch_all_pages(wt_query, max_pages=15)
+                    for r in wt_rows:
+                        src = r.get(wt_src_col) or ""
+                        src_low = src.lower()
+                        if t_clean in src_low or (t_clean + "s") in src_low or (t_clean[:-1] in src_low if t_clean.endswith("s") else False):
+                            hits = self._parse_code_for_webapi_calls(src)
+                            for hit in hits:
+                                if hit.get("table_name") == t_clean or hit.get("table_raw") == t_clean:
+                                    hit.update({
+                                        "component_type": "Web Template",
+                                        "component_name": r.get(wt_name_col) or "Web Template",
+                                        "component_id": r.get(wt_id_col) or "",
+                                        "table_source": wt_tbl,
+                                        "field_source": wt_src_col,
+                                        "website_id": website_id or "",
+                                        "is_webapi": True,
+                                    })
+                                    context["code_occurrences"].append(hit)
+                            fx_hits = self._extract_fetchxml_usage(src, allowed_tables={t_clean})
+                            for fx in fx_hits:
+                                if fx.get("table_name") == t_clean:
+                                    fx.update({
+                                        "component_type": "Web Template",
+                                        "component_name": r.get(wt_name_col) or "Web Template",
+                                        "component_id": r.get(wt_id_col) or "",
+                                        "table_source": wt_tbl,
+                                        "field_source": wt_src_col,
+                                        "website_id": website_id or "",
+                                    })
+                                    context["code_occurrences"].append(fx)
+            except Exception as exc:
+                logger.debug("On-demand Web Template scan failed for %s: %s", t_clean, exc)
+
+        # 7c. On-demand scan of script-bearing Site Settings for this table
+        try:
+            for schema in schemas_to_query:
+                st_rows = self._odata_get(
+                    f"{schema}_sitesettings?$select={schema}_sitesettingid,{schema}_name,{schema}_value"
+                    f"&$filter=(contains({schema}_name, 'Tracking') or contains({schema}_name, 'Header') or contains({schema}_name, 'Footer') or contains({schema}_name, 'Script'))"
+                )
+                if st_rows and st_rows.get("value"):
+                    for r in st_rows["value"]:
+                        val = r.get(f"{schema}_value") or ""
+                        val_low = val.lower()
+                        if t_clean in val_low or (t_clean + "s") in val_low:
+                            hits = self._parse_code_for_webapi_calls(val)
+                            for hit in hits:
+                                if hit.get("table_name") == t_clean or hit.get("table_raw") == t_clean:
+                                    hit.update({
+                                        "component_type": "Site Setting (Script/Tracking)",
+                                        "component_name": r.get(f"{schema}_name") or "Site Setting",
+                                        "component_id": r.get(f"{schema}_sitesettingid") or "",
+                                        "table_source": f"{schema}_sitesettings",
+                                        "field_source": f"{schema}_value",
+                                        "website_id": website_id or "",
+                                        "is_webapi": True,
+                                        "is_client_js": True,
+                                    })
+                                    context["code_occurrences"].append(hit)
+        except Exception as exc:
+            logger.debug("On-demand Site Setting scan failed for %s: %s", t_clean, exc)
 
         return context

@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.3] - 2026-10-24
+
+### 🛡️ Power Pages Web API Auditor (`portal_webapi_auditor` v1.3.0)
+- **Expanded Surface & Blind Spot Detection**:
+  - **Injected Global Scripts**: Scans `adx_sitesettings`, `mspp_sitesettings`, and Enhanced Data Model `powerpagecomponents` (type 9) for script-bearing settings (`<script>`, `/_api/`, `function`, `webapi`) with global badge tagging.
+  - **Cloud Flow Web API Triggers**: Detects client-side triggers to Power Automate Cloud Flows (`/_api/cloudflows/v1.0/trigger/<flow_id>`).
+  - **Bound Custom Actions & Custom APIs**: Parses bound actions on entity endpoints (e.g. `/_api/contacts(id)/Microsoft.Dynamics.CRM.actionName`) without distorting entity resolution.
+  - **Embedded Subgrids**: Parses model-driven `formxml` in Basic/Multistep Forms to extract `<TargetEntityType>` references.
+- **Lookup Dual-Representation & Whitelist Expansion**:
+  - Direct AST and regex extraction of `_<lookup>_value` property accesses in client scripts.
+  - Auto-expansion and bidirectional whitelist pairing for Lookups across Logical Names, Schema Names, and `_<lookup>_value`.
+- **Diagnostics & UI Improvements**:
+  - Added Website Discovery Details diagnostic inspector for multi-site Power Pages environments.
+  - Improved caching invalidation and site settings resolution.
+
+---
+
 ## [1.0.2] - 2026-10-17
 
 ### 🛡️ Power Pages Web API Auditor (`portal_webapi_auditor` v1.2.0)
