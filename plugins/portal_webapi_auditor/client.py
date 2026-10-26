@@ -92,7 +92,7 @@ class PortalWebApiAuditorClient:
             "Accept": "application/json",
             "OData-MaxVersion": "4.0",
             "OData-Version": "4.0",
-            "Prefer": 'odata.include-annotations="*"',
+            "Prefer": 'odata.include-annotations="*",odata.maxpagesize=5000',
         }
         self.last_errors: list[str] = []
         self._entity_set_cache: dict[str, str] = dict(COMMON_ENTITY_SET_MAP)
@@ -120,6 +120,8 @@ class PortalWebApiAuditorClient:
         PortalWebApiAuditorClient._DISCOVERED_WRAPPERS.clear()
         if hasattr(self, "_all_form_fields_map"):
             self._all_form_fields_map.clear()
+        if hasattr(self, "_webtemplate_code_cache"):
+            self._webtemplate_code_cache.clear()
         self.last_errors.clear()
 
     # ------------------------------------------------------------------
@@ -146,13 +148,22 @@ class PortalWebApiAuditorClient:
             self.last_errors.append(f"OData GET error ({path}): {exc}")
             return None
 
-    def _fetch_all_pages(self, initial_query: str, max_pages: int = 15) -> list[dict]:
-        """Fetch all pages following @odata.nextLink up to max_pages."""
+    def _fetch_all_pages(self, initial_query: str, max_pages: int = 500) -> list[dict]:
+        """
+        Fetch all pages following @odata.nextLink.
+        Default max_pages is 500 (up to 2,500,000 records with maxpagesize=5000),
+        ensuring large portal environments are never truncated.
+        """
         records: list[dict] = []
         next_url: Optional[str] = f"{self.org_url}/api/data/v9.2/{initial_query}"
+        seen_urls: set[str] = set()
 
         page = 0
         while next_url and page < max_pages:
+            if next_url in seen_urls:
+                self.last_errors.append(f"Circular pagination loop detected: {next_url}")
+                break
+            seen_urls.add(next_url)
             try:
                 res = requests.get(next_url, headers=self.headers, timeout=60)
                 if not res.ok:
@@ -169,6 +180,12 @@ class PortalWebApiAuditorClient:
             except Exception as exc:
                 self.last_errors.append(f"Pagination error: {exc}")
                 break
+
+        if next_url and page >= max_pages:
+            warn_msg = f"Pagination reached safety limit of {max_pages} pages ({len(records)} records fetched). Additional records exist in Dataverse."
+            self.last_errors.append(warn_msg)
+            logger.warning(warn_msg)
+
         return records
 
     # ------------------------------------------------------------------
@@ -1050,15 +1067,17 @@ class PortalWebApiAuditorClient:
         # Pass 1A: Scan Enhanced Data Model powerpagecomponents (Web Templates, Pages, Forms, Lists, Snippets)
         if not website_id or target_schema == "powerpage":
             ppc_types = {
-                11: "Web Template",
+                8: "Web Template",
                 2: "Web Page",
-                15: "Basic Form",
-                19: "Multistep Form Step",
-                21: "Entity List",
+                6: "Page Template",
                 7: "Content Snippet",
-                20: "Step Metadata (Inline Script)",
-                26: "Form Metadata (Inline Script)",
                 9: "Site Setting (Script/Tracking)",
+                15: "Basic Form",
+                16: "Form Metadata (Inline Script)",
+                17: "Entity List",
+                19: "Multistep Form",
+                20: "Multistep Form Step",
+                21: "Step Metadata (Inline Script)",
             }
             type_filter = " or ".join([f"powerpagecomponenttype eq {t}" for t in ppc_types])
             ppc_filter = f"({type_filter})"
@@ -1066,7 +1085,7 @@ class PortalWebApiAuditorClient:
                 ppc_filter += f" and _powerpagesiteid_value eq {website_id}"
 
             ppc_query = f"powerpagecomponents?$filter={quote(ppc_filter)}&$select=powerpagecomponentid,name,powerpagecomponenttype,content,_powerpagesiteid_value"
-            ppc_rows = self._fetch_all_pages(ppc_query, max_pages=30)
+            ppc_rows = self._fetch_all_pages(ppc_query, max_pages=500)
             dbg_log.write(f"Target: powerpagecomponents (Power Pages Enhanced Model) -> fetched {len(ppc_rows)} records\n")
 
             for r in ppc_rows:
@@ -1133,79 +1152,86 @@ class PortalWebApiAuditorClient:
                     })
 
         # Pass 1B: Scan standard text / code fields across templates, pages, forms, snippets, metadata (adx & mspp)
-        if not website_id or target_schema in ("adx", "mspp"):
-            for schema, table, id_col, name_col, content_cols, site_col, comp_type in scan_targets:
-                select_cols = [id_col, name_col] + content_cols
+        scanned_rec_ids = {b["rec_id"] for b in all_code_blocks if b.get("rec_id")}
+        for schema, table, id_col, name_col, content_cols, site_col, comp_type in scan_targets:
+            if target_schema in ("adx", "mspp") and schema != target_schema:
+                continue
+
+            select_cols = [id_col, name_col] + content_cols
+            if site_col:
+                select_cols.append(site_col)
+
+            filter_clauses = []
+            if website_id and site_col:
+                filter_clauses.append(f"({site_col} eq {website_id} or {site_col} eq null)")
+
+            query = f"{table}?$select={','.join(select_cols)}"
+            if filter_clauses:
+                query += f"&$filter={quote(' and '.join(filter_clauses))}"
+
+            rows = self._fetch_all_pages(query, max_pages=500)
+            if not rows and any("registerstartupscript" in c for c in content_cols):
+                fallback_cols = [c.replace("registerstartupscript", "customjavascript") for c in content_cols]
+                f_query = f"{table}?$select={','.join([id_col, name_col] + fallback_cols)}"
                 if site_col:
-                    select_cols.append(site_col)
-
-                filter_clauses = []
-                if website_id and site_col:
-                    filter_clauses.append(f"({site_col} eq {website_id} or {site_col} eq null)")
-
-                query = f"{table}?$select={','.join(select_cols)}"
+                    f_query += f",{site_col}"
                 if filter_clauses:
-                    query += f"&$filter={quote(' and '.join(filter_clauses))}"
+                    f_query += f"&$filter={quote(' and '.join(filter_clauses))}"
+                fallback_rows = self._fetch_all_pages(f_query, max_pages=500)
+                if fallback_rows:
+                    rows = fallback_rows
+                    content_cols = fallback_cols
 
-                rows = self._fetch_all_pages(query, max_pages=30)
-                if not rows and any("registerstartupscript" in c for c in content_cols):
-                    fallback_cols = [c.replace("registerstartupscript", "customjavascript") for c in content_cols]
-                    f_query = f"{table}?$select={','.join([id_col, name_col] + fallback_cols)}"
-                    if site_col:
-                        f_query += f",{site_col}"
-                    if filter_clauses:
-                        f_query += f"&$filter={quote(' and '.join(filter_clauses))}"
-                    fallback_rows = self._fetch_all_pages(f_query, max_pages=30)
-                    if fallback_rows:
-                        rows = fallback_rows
-                        content_cols = fallback_cols
+            with_code = sum(1 for r in rows if any(r.get(c) for c in content_cols))
+            dbg_log.write(f"Target: {table} ({comp_type}) -> fetched {len(rows)} records ({with_code} with code)\n")
+            if len(rows) == 0 and self.last_errors:
+                dbg_log.write(f"   [Notice] Last error: {self.last_errors[-1]}\n")
 
-                with_code = sum(1 for r in rows if any(r.get(c) for c in content_cols))
-                dbg_log.write(f"Target: {table} ({comp_type}) -> fetched {len(rows)} records ({with_code} with code)\n")
-                if len(rows) == 0 and self.last_errors:
-                    dbg_log.write(f"   [Notice] Last error: {self.last_errors[-1]}\n")
+            for row in rows:
+                rec_id = row.get(id_col) or ""
+                if rec_id and rec_id in scanned_rec_ids:
+                    continue
+                if rec_id:
+                    scanned_rec_ids.add(rec_id)
+                rec_name = row.get(name_col) or "Unnamed Record"
+                web_id = row.get(site_col) if site_col else ""
 
-                for row in rows:
-                    rec_id = row.get(id_col) or ""
-                    rec_name = row.get(name_col) or "Unnamed Record"
-                    web_id = row.get(site_col) if site_col else ""
+                for col in content_cols:
+                    code_text = row.get(col)
+                    if not code_text or not isinstance(code_text, str):
+                        continue
 
-                    for col in content_cols:
-                        code_text = row.get(col)
-                        if not code_text or not isinstance(code_text, str):
+                    # Smart filter for site settings: only index script-bearing or tracking settings
+                    if table in ("adx_sitesettings", "mspp_sitesettings"):
+                        s_name_low = rec_name.lower()
+                        c_text_low = code_text.lower()
+                        is_script_setting = (
+                            "tracking" in s_name_low
+                            or "header" in s_name_low
+                            or "footer" in s_name_low
+                            or "script" in s_name_low
+                            or "javascript" in s_name_low
+                            or "<script" in c_text_low
+                            or "/_api/" in c_text_low
+                            or "webapi" in c_text_low
+                            or "function" in c_text_low
+                        )
+                        if not is_script_setting:
                             continue
 
-                        # Smart filter for site settings: only index script-bearing or tracking settings
-                        if table in ("adx_sitesettings", "mspp_sitesettings"):
-                            s_name_low = rec_name.lower()
-                            c_text_low = code_text.lower()
-                            is_script_setting = (
-                                "tracking" in s_name_low
-                                or "header" in s_name_low
-                                or "footer" in s_name_low
-                                or "script" in s_name_low
-                                or "javascript" in s_name_low
-                                or "<script" in c_text_low
-                                or "/_api/" in c_text_low
-                                or "webapi" in c_text_low
-                                or "function" in c_text_low
-                            )
-                            if not is_script_setting:
-                                continue
+                    helper_map = self._extract_query_helper_functions(code_text)
+                    if helper_map:
+                        query_func_registry.update(helper_map)
 
-                        helper_map = self._extract_query_helper_functions(code_text)
-                        if helper_map:
-                            query_func_registry.update(helper_map)
-
-                        all_code_blocks.append({
-                            "rec_id": rec_id,
-                            "rec_name": rec_name,
-                            "web_id": web_id,
-                            "table": table,
-                            "col": col,
-                            "comp_type": comp_type,
-                            "code_text": code_text,
-                        })
+                    all_code_blocks.append({
+                        "rec_id": rec_id,
+                        "rec_name": rec_name,
+                        "web_id": web_id,
+                        "table": table,
+                        "col": col,
+                        "comp_type": comp_type,
+                        "code_text": code_text,
+                    })
 
         # Pass 1B: Automatically discover custom Web API wrapper functions across all templates/components
         discovered_wrappers = self._discover_webapi_wrapper_functions(all_code_blocks)
@@ -1381,7 +1407,7 @@ class PortalWebApiAuditorClient:
             if website_id:
                 q += f"&$filter={site_col} eq {website_id} or {site_col} eq null"
 
-            wf_rows = self._fetch_all_pages(q, max_pages=20)
+            wf_rows = self._fetch_all_pages(q, max_pages=500)
             dbg_log.write(f"Target: {tbl_webfiles} -> fetched {len(wf_rows)} web files\n")
 
             for wf in wf_rows:
@@ -2007,8 +2033,8 @@ class PortalWebApiAuditorClient:
                     "website_id": web_id,
                 })
 
-        # Enhanced Data Model: powerpagecomponents (type 18 = List / Entity List)
-        ppc_query = "powerpagecomponents?$filter=powerpagecomponenttype eq 18&$select=powerpagecomponentid,name,content,_powerpagesiteid_value"
+        # Enhanced Data Model: powerpagecomponents (type 17 = List / Entity List)
+        ppc_query = "powerpagecomponents?$filter=powerpagecomponenttype eq 17&$select=powerpagecomponentid,name,content,_powerpagesiteid_value"
         if website_id:
             ppc_query += f" and _powerpagesiteid_value eq {website_id}"
         ppc_lists = self._fetch_all_pages(ppc_query, max_pages=10)
@@ -2056,7 +2082,7 @@ class PortalWebApiAuditorClient:
                 "component_name": list_name,
                 "component_id": list_id,
                 "table_source": "powerpagecomponents",
-                "field_source": "powerpagecomponenttype_18",
+                "field_source": "powerpagecomponenttype_17",
                 "website_id": web_id,
             })
 
@@ -3509,6 +3535,141 @@ class PortalWebApiAuditorClient:
         return found
 
     # ------------------------------------------------------------------
+    # Web Template Code Scanning (Always Scanned)
+    # ------------------------------------------------------------------
+
+    def get_webtemplate_code_occurrences(
+        self,
+        website_id: Optional[str] = None,
+        known_tables: Optional[list[str]] = None,
+    ) -> list[dict]:
+        """
+        Scan all Web Templates for client-side Web API calls and FetchXML queries.
+        Results are cached by website_id to ensure fast sub-second performance.
+        """
+        cache_key = f"wt_{website_id or 'all'}"
+        if not hasattr(self, "_webtemplate_code_cache"):
+            self._webtemplate_code_cache = {}
+
+        kt_set = {t.lower() for t in (known_tables or [])}
+
+        if cache_key in self._webtemplate_code_cache:
+            all_cached = self._webtemplate_code_cache[cache_key]
+            if kt_set:
+                return [
+                    o for o in all_cached
+                    if o.get("table_name", "").lower() in kt_set
+                    or (o.get("table_name", "") + "s").lower() in kt_set
+                    or (o.get("table_name", "")[:-1].lower() in kt_set if o.get("table_name", "").endswith("s") else False)
+                ]
+            return all_cached
+
+        target_schema = self.get_website_schema(website_id) if website_id else None
+        schemas_to_query = [target_schema] if target_schema in ("adx", "mspp") else ["adx", "mspp"]
+
+        webtemplates: list[dict] = []
+
+        # 1. Enhanced Data Model (powerpagecomponents type 8)
+        if not website_id or target_schema == "powerpage":
+            ppc_filter = "powerpagecomponenttype eq 8"
+            if website_id:
+                ppc_filter += f" and _powerpagesiteid_value eq {website_id}"
+            query = f"powerpagecomponents?$filter={quote(ppc_filter)}&$select=powerpagecomponentid,name,content,_powerpagesiteid_value"
+            rows = self._fetch_all_pages(query, max_pages=500)
+            for r in rows:
+                cid = r.get("powerpagecomponentid") or ""
+                cname = r.get("name") or "Web Template"
+                site_val = r.get("_powerpagesiteid_value") or website_id or ""
+                content_raw = r.get("content") or ""
+                src_text = ""
+                if isinstance(content_raw, str):
+                    if content_raw.strip().startswith("{") and content_raw.strip().endswith("}"):
+                        try:
+                            cjson = json.loads(content_raw)
+                            src_text = cjson.get("source") or cjson.get("adx_source") or content_raw
+                        except Exception:
+                            src_text = content_raw
+                    else:
+                        src_text = content_raw
+                if src_text:
+                    webtemplates.append({
+                        "id": cid,
+                        "name": cname,
+                        "source": src_text,
+                        "table": "powerpagecomponents",
+                        "field": "content",
+                        "website_id": site_val,
+                    })
+
+        # 2. Standard Model (adx & mspp)
+        for schema in schemas_to_query:
+            wt_tbl = f"{schema}_webtemplates"
+            wt_id_col = f"{schema}_webtemplateid"
+            wt_name_col = f"{schema}_name"
+            wt_src_col = f"{schema}_source"
+            wt_site_col = f"_{schema}_websiteid_value"
+
+            filter_clauses = []
+            if website_id:
+                filter_clauses.append(f"({wt_site_col} eq {website_id} or {wt_site_col} eq null)")
+
+            query = f"{wt_tbl}?$select={wt_id_col},{wt_name_col},{wt_src_col}"
+            if filter_clauses:
+                query += f"&$filter={quote(' and '.join(filter_clauses))}"
+
+            rows = self._fetch_all_pages(query, max_pages=500)
+            for r in rows:
+                src = r.get(wt_src_col) or ""
+                if src:
+                    webtemplates.append({
+                        "id": r.get(wt_id_col) or "",
+                        "name": r.get(wt_name_col) or "Web Template",
+                        "source": src,
+                        "table": wt_tbl,
+                        "field": wt_src_col,
+                        "website_id": r.get(wt_site_col) or website_id or "",
+                    })
+
+        # Parse all webtemplates
+        occurrences: list[dict] = []
+        for wt in webtemplates:
+            src = wt["source"]
+            hits = self._parse_code_for_webapi_calls(src)
+            for hit in hits:
+                hit.update({
+                    "component_type": "Web Template",
+                    "component_name": wt["name"],
+                    "component_id": wt["id"],
+                    "table_source": wt["table"],
+                    "field_source": wt["field"],
+                    "website_id": wt["website_id"],
+                    "is_webapi": True,
+                })
+                occurrences.append(hit)
+
+            fx_hits = self._extract_fetchxml_usage(src, allowed_tables=kt_set if kt_set else None)
+            for fx in fx_hits:
+                fx.update({
+                    "component_type": "Web Template",
+                    "component_name": wt["name"],
+                    "component_id": wt["id"],
+                    "table_source": wt["table"],
+                    "field_source": wt["field"],
+                    "website_id": wt["website_id"],
+                })
+                occurrences.append(fx)
+
+        self._webtemplate_code_cache[cache_key] = occurrences
+        if kt_set:
+            return [
+                o for o in occurrences
+                if o.get("table_name", "").lower() in kt_set
+                or (o.get("table_name", "") + "s").lower() in kt_set
+                or (o.get("table_name", "")[:-1].lower() in kt_set if o.get("table_name", "").endswith("s") else False)
+            ]
+        return occurrences
+
+    # ------------------------------------------------------------------
     # Reconciliation Engine
     # ------------------------------------------------------------------
 
@@ -3544,10 +3705,6 @@ class PortalWebApiAuditorClient:
                     target_schema = "adx"
         default_setting_table = "powerpagecomponents" if target_schema == "powerpage" else (f"{target_schema}_sitesettings" if target_schema else "adx_sitesettings")
 
-        # Map detected fields by table_name — governed occurrences ONLY
-        # (Only /_api/ calls, SDK wrappers, PCF, Entity List OData, Lookup Controls
-        #  are restricted by Webapi/<table>/fields.  FetchXML, Liquid, Basic Forms
-        #  are server-side and governed by Table Permissions, not this setting.)
         # Map site settings by table_name
         settings_by_table: dict[str, dict] = {s["table_name"]: s for s in site_settings}
 
@@ -4244,8 +4401,8 @@ class PortalWebApiAuditorClient:
                             "form_fields": mda_fields,
                             "table": "powerpagecomponents",
                         })
-                elif ctype == 19:
-                    ent = (cjson.get("targetentitylogicalname") or cjson.get("adx_targetentitylogicalname") or "").strip().lower()
+                elif ctype in (19, 20):
+                    ent = (cjson.get("targetentitylogicalname") or cjson.get("adx_targetentitylogicalname") or cjson.get("entityname") or "").strip().lower()
                     if ent == t_clean:
                         mda_fname = cjson.get("formname") or cjson.get("adx_formname") or ""
                         mda_fields = self.get_form_fields_by_name(t_clean, mda_fname) if mda_fname else []
@@ -4257,7 +4414,7 @@ class PortalWebApiAuditorClient:
                             "form_fields": mda_fields,
                             "table": "powerpagecomponents",
                         })
-                elif ctype == 21:
+                elif ctype == 17:
                     ent = (cjson.get("entityname") or cjson.get("adx_entityname") or "").strip().lower()
                     if ent == t_clean:
                         context["entity_lists"].append({
@@ -4266,7 +4423,7 @@ class PortalWebApiAuditorClient:
                             "table": "powerpagecomponents",
                         })
                 elif ctype == 18:
-                    ent = (cjson.get("entityname") or cjson.get("adx_entityname") or "").strip().lower()
+                    ent = (cjson.get("entityname") or cjson.get("adx_entityname") or cjson.get("entitylogicalname") or "").strip().lower()
                     if ent == t_clean:
                         context["table_permissions"].append({
                             "name": cname,
@@ -4276,8 +4433,39 @@ class PortalWebApiAuditorClient:
                             "create": cjson.get("create") or cjson.get("adx_create"),
                             "table": "powerpagecomponents",
                         })
-        else:
-            for schema in ["adx", "mspp"]:
+                elif ctype == 8:
+                    src = cjson.get("source") or cjson.get("adx_source") or ""
+                    src_low = src.lower()
+                    if t_clean in src_low or (t_clean + "s") in src_low or (t_clean[:-1] in src_low if t_clean.endswith("s") else False):
+                        hits = self._parse_code_for_webapi_calls(src)
+                        for hit in hits:
+                            if hit.get("table_name") == t_clean or hit.get("table_raw") == t_clean:
+                                hit.update({
+                                    "component_type": "Web Template",
+                                    "component_name": cname,
+                                    "component_id": cid,
+                                    "table_source": "powerpagecomponents",
+                                    "field_source": "content.source",
+                                    "website_id": website_id or "",
+                                    "is_webapi": True,
+                                })
+                                context["code_occurrences"].append(hit)
+                        fx_hits = self._extract_fetchxml_usage(src, allowed_tables={t_clean})
+                        for fx in fx_hits:
+                            if fx.get("table_name") == t_clean:
+                                fx.update({
+                                    "component_type": "Web Template",
+                                    "component_name": cname,
+                                    "component_id": cid,
+                                    "table_source": "powerpagecomponents",
+                                    "field_source": "content.source",
+                                    "website_id": website_id or "",
+                                })
+                                context["code_occurrences"].append(fx)
+
+        # Fallback to mspp/adx sitesettings if powerpagecomponents yielded none
+        if not context["site_settings"]:
+            for schema in ["mspp", "adx"]:
                 query = (
                     f"{schema}_sitesettings?$filter=contains({schema}_name, '{t_clean}')"
                     f"&$select={schema}_sitesettingid,{schema}_name,{schema}_value,_{schema}_websiteid_value"
@@ -4298,7 +4486,7 @@ class PortalWebApiAuditorClient:
                             "portal_name": row_site_name,
                         }
                         if website_id:
-                            if row_site_id == website_id and schema == target_schema:
+                            if row_site_id == website_id and (target_schema in ("adx", "mspp") and schema == target_schema or target_schema not in ("adx", "mspp")):
                                 context["site_settings"].append(item)
                             else:
                                 context["cross_portal_site_settings"].append(item)
@@ -4313,8 +4501,8 @@ class PortalWebApiAuditorClient:
         f_list = [f.strip() for f in fields_val.split(",") if f.strip()]
         context["catalog_role"] = self.detect_catalog_and_validation_role(t_clean, f_list)
 
-        # 2. Basic Forms — query target schema and filter by website if specified
-        schemas_to_query = [target_schema] if target_schema in ("adx", "mspp") else (["adx", "mspp"] if not target_schema else [])
+        # 2. Basic Forms — query target schema or standard schemas if powerpage
+        schemas_to_query = [target_schema] if target_schema in ("adx", "mspp") else ["mspp", "adx"]
         for schema in schemas_to_query:
             filter_str = f"{schema}_entityname eq '{t_clean}'"
             if website_id:

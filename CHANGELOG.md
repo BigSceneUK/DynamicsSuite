@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.4] - 2026-10-26
+
+### 🛡️ Power Pages Web API Auditor (`portal_webapi_auditor` v1.4.0)
+- **Enterprise Pagination & High-Volume Dataverse Environments**:
+  - Expanded OData pagination safety limit from 15 pages to 500 pages with `odata.maxpagesize=5000` header, supporting large environments with up to 2.5 million records without truncation.
+  - Added circular pagination loop detection (`seen_urls` tracking) and safety limit warning logs.
+- **Enhanced Data Model (EDM) Component Handling**:
+  - Web Templates (component type 8) parsing for Web API and FetchXML occurrences.
+  - Expanded Basic / Multistep Form entity discovery (component types 19 and 20).
+  - Refined Entity Lists (component type 17) and Table Permissions (component type 18) mapping.
+  - Fallback querying across `mspp` and `adx` site settings when Enhanced Data Model yields no site settings.
+- **Cache Synchronization**:
+  - Bumped version invalidation hash to `v42_expand_max_pages_to_500` to automatically clear stale session caches.
+
+### 🚀 DynamicsSuite Core (v1.0.4)
+- **Diagnostics & Feedback**: Bumped core version indicator in `core/ui/feedback_dialog.py` to `v1.0.4`.
+- **Packaging & Distribution**: Packaged official `v1.0.4` release archives with `portal_webapi_auditor` v1.4.0.
+
+---
+
 ## [1.0.3] - 2026-10-24
 
 ### 🛡️ Power Pages Web API Auditor (`portal_webapi_auditor` v1.3.0)

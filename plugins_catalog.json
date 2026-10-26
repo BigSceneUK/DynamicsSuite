@@ -1,18 +1,18 @@
 {
   "catalog_version": "1.0.0",
-  "updated_at": "2026-10-24T19:27:08Z",
+  "updated_at": "2026-10-26T15:37:36Z",
   "plugins": [
     {
       "id": "portal_webapi_auditor",
       "name": "Power Page API Wildcard Auditor",
-      "version": "1.3.0",
+      "version": "1.4.0",
       "author": "DynamicsSuite Team",
       "released_by": "BigSceneUK",
-      "release_date": "2026-10-24",
+      "release_date": "2026-10-26",
       "description": "Audit Power Pages Web API site settings for deprecated '*' wildcards, scan portal JS/HTML for table & field usage, drill down into calling components, and 1-click update field whitelists.",
       "icon": "🛡️",
       "download_url": "https://bigscene.uk/DynamicsSuite/releases/portal_webapi_auditor.zip",
-      "sha256": "1e7c9371aca370f3c744b623348a520e793706eb24d51f253256090832014edf",
+      "sha256": "ee8f4eeef4dad62b09d58bd1fb163f2922c1f6851940c609a5c10f470d5727af",
       "tags": [
         "Security",
         "Power Pages",
@@ -93,15 +93,15 @@
     },
     {
       "id": "audit_history",
-      "name": "Audit History Explorer",
-      "version": "1.0.0",
+      "name": "Audit History",
+      "version": "1.1.0",
       "author": "DynamicsSuite Team",
       "released_by": "DynamicsSuite Team",
       "release_date": "2026-09-04",
-      "description": "Browse field-level Dataverse record changes — who changed what, when, and from which value to which.",
+      "description": "Browse field-level Dataverse record changes (who changed what and when), and correlate updates to identify the responsible Cloud Flows and Classic Processes.",
       "icon": "📜",
       "download_url": "https://bigscene.uk/DynamicsSuite/releases/audit_history.zip",
-      "sha256": "92419b5d9a231172dc58c971cbb72623940b04a3d9a5e4643a4cb37bc28cd669",
+      "sha256": "28a107e5b6b208c7e956af36a81f941b9b0f44cb642d5fe9fa7796b758af9619",
       "tags": [
         "Audit",
         "History",
