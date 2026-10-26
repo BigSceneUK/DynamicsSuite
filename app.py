@@ -2,7 +2,14 @@ import traceback
 import streamlit as st
 
 from core.plugin_registry import PluginRegistry
-from core.ui import login_page, sidebar, plugin_manager_page, plugin_header, feedback_dialog
+from core.ui import (
+    login_page,
+    sidebar,
+    plugin_manager_page,
+    plugin_header,
+    feedback_dialog,
+    update_banner,
+)
 
 st.set_page_config(
     page_title="Dynamics Suite",
@@ -44,6 +51,7 @@ if "selected_plugin_id" not in st.session_state:
     st.session_state["selected_plugin_id"] = "__plugin_manager__"
 
 selected_id = sidebar.render(registry, ctx)
+update_banner.render(registry)
 
 # ------------------------------------------------------------------
 # Routing

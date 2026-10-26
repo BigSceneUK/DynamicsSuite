@@ -22,6 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Bumped version invalidation hash to `v42_expand_max_pages_to_500` to automatically clear stale session caches.
 
 ### 🚀 DynamicsSuite Core (v1.0.4)
+- **Startup Plugin Update Checker & Notification Banner**:
+  - Implemented `core/ui/update_banner.py` to automatically check for outdated plugins against the catalog on startup.
+  - Displays a clean, non-intrusive top notification banner with 1-click update, Plugin Manager navigation, and session dismissal.
+  - Features session-level caching (30-minute TTL) and graceful network fallbacks to avoid UI lag.
 - **Diagnostics & Feedback**: Bumped core version indicator in `core/ui/feedback_dialog.py` to `v1.0.4`.
 - **Packaging & Distribution**: Packaged official `v1.0.4` release archives with `portal_webapi_auditor` v1.4.0.
 

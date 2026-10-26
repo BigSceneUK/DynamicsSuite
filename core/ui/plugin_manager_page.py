@@ -17,6 +17,7 @@ from core.plugin_store import (
     install_or_update_plugin,
     uninstall_plugin,
 )
+from core.ui import update_banner
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent.parent
 _PLUGINS_DIR = _REPO_ROOT / "plugins"
@@ -764,6 +765,7 @@ def _render_store_tab(registry: PluginRegistry) -> None:
                         with st.spinner(f"Downloading and installing {sp.name}..."):
                             ok, msg = install_or_update_plugin(sp, registry)
                             if ok:
+                                update_banner.clear_update_cache()
                                 st.success(msg)
                                 st.rerun()
                             else:
@@ -795,6 +797,7 @@ def _render_store_tab(registry: PluginRegistry) -> None:
                         with st.spinner(f"Updating {sp.name} to v{sp.version}..."):
                             ok, msg = install_or_update_plugin(sp, registry)
                             if ok:
+                                update_banner.clear_update_cache()
                                 st.success(msg)
                                 st.rerun()
                             else:
