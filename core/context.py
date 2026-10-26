@@ -24,6 +24,7 @@ class AppContext:
     # Power Platform environment (can be overridden per-plugin in session_state)
     org_url: str = ""
     env_id: str = ""
+    environment_name: str = ""
 
     # MSAL token cache — shared so silent acquisition works across plugins
     msal_cache: msal.SerializableTokenCache = field(

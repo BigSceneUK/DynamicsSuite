@@ -7,13 +7,14 @@ from plugins.audit_history import ui
 
 
 class AuditHistoryPlugin(PluginBase):
-    name = "Audit History Explorer"
+    name = "Audit History"
     icon = "📜"
     description = (
-        "Browse field-level Dataverse record changes — who changed what, "
-        "when, and from which value to which."
+        "Browse field-level Dataverse record changes (who changed what and when), "
+        "and correlate updates to identify the responsible Cloud Flows and Classic Processes."
     )
-    version = "1.0.0"
+    version = "1.1.0"
+
     release_date = "2026-09-04"
     author = "DynamicsSuite Team"
     released_by = "DynamicsSuite Team"
