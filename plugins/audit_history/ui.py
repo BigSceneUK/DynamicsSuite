@@ -38,8 +38,17 @@ from plugins.audit_history.correlator import (
     render_flow_history_table_html,
     render_outbound_triggers_table_html,
 )
-from plugins.logic_app.client import LogicAppClient
-from plugins.logic_app_entity_inspector.cache import load_cache as load_logic_app_cache
+try:
+    from plugins.logic_app.client import LogicAppClient
+except ImportError:
+    LogicAppClient = None
+
+try:
+    from plugins.logic_app_entity_inspector.cache import load_cache as load_logic_app_cache
+except ImportError:
+    def load_logic_app_cache() -> dict:
+        return {}
+
 from plugins.audit_history import persistence
 
 
@@ -1162,7 +1171,7 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
 
                 logic_client = None
                 arm_tok = _get_arm_token(ctx)
-                if arm_tok:
+                if arm_tok and LogicAppClient is not None:
                     try:
                         logic_client = LogicAppClient(arm_tok)
                     except Exception:

@@ -145,6 +145,13 @@ def get_plugin_status(store_plugin: StorePlugin, registry: PluginRegistry) -> tu
         if not plugin_dir.exists() or not (plugin_dir / "plugin.py").exists():
             return PluginStatus.NOT_INSTALLED, None
         installed_version = "1.0.0"
+        try:
+            content = (plugin_dir / "plugin.py").read_text(encoding="utf-8")
+            m = re.search(r'version\s*=\s*["\']([^"\']+)["\']', content)
+            if m:
+                installed_version = m.group(1).strip()
+        except Exception:
+            pass
 
     try:
         remote_v = parse_version(store_plugin.version)

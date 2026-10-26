@@ -153,6 +153,15 @@ class PluginRegistry:
 
             try:
                 module_name = f"plugins.{plugin_id}.plugin"
+                if force:
+                    importlib.invalidate_caches()
+                    to_remove = [
+                        m for m in list(sys.modules.keys())
+                        if m == f"plugins.{plugin_id}" or m.startswith(f"plugins.{plugin_id}.")
+                    ]
+                    for m in to_remove:
+                        sys.modules.pop(m, None)
+
                 if module_name in sys.modules:
                     module = importlib.reload(sys.modules[module_name])
                 else:

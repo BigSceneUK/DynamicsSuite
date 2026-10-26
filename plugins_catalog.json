@@ -101,7 +101,7 @@
       "description": "Browse field-level Dataverse record changes (who changed what and when), and correlate updates to identify the responsible Cloud Flows and Classic Processes.",
       "icon": "📜",
       "download_url": "https://bigscene.uk/DynamicsSuite/releases/audit_history.zip",
-      "sha256": "28a107e5b6b208c7e956af36a81f941b9b0f44cb642d5fe9fa7796b758af9619",
+      "sha256": "092f164c35280ea16b33719c76dbda8cdc61d7c20f437363da04e93890eeeaec",
       "tags": [
         "Audit",
         "History",
