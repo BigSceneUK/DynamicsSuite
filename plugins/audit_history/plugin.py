@@ -13,9 +13,9 @@ class AuditHistoryPlugin(PluginBase):
         "Browse field-level Dataverse record changes (who changed what and when), "
         "and correlate updates to identify the responsible Cloud Flows and Classic Processes."
     )
-    version = "1.1.0"
+    version = "1.1.1"
 
-    release_date = "2026-09-04"
+    release_date = "2026-10-30"
     author = "DynamicsSuite Team"
     released_by = "DynamicsSuite Team"
     tags = ["Audit", "History", "Compliance"]

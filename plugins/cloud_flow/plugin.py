@@ -13,8 +13,8 @@ class CloudFlowPlugin(PluginBase):
         "Search by flow name or date range via the Dataverse API, "
         "with optional Power Automate API for richer run details."
     )
-    version = "1.0.0"
-    release_date = "2026-09-01"
+    version = "1.0.1"
+    release_date = "2026-10-30"
     author = "DynamicsSuite Team"
     released_by = "DynamicsSuite Team"
     tags = ["Power Automate", "Flow", "Automation"]
