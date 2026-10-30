@@ -197,11 +197,17 @@ class DataverseClient:
             logging.warning("Could not fetch organization ID: %s", exc)
             return None
 
-    def get_workflows_for_entity(self, entity_logical_name: str = "", include_inactive: bool = False) -> list[dict]:
+    def get_workflows_for_entity(
+        self,
+        entity_logical_name: str = "",
+        include_inactive: bool = False,
+        ignore_name_patterns: list[str] | None = None,
+    ) -> list[dict]:
         """
         Fetch Cloud Flows (category 5) and Classic Workflows (category 0) in the environment.
         Uses lightweight metadata fields and odata.maxpagesize=5000 so all active workflows
         (even environments with 8,000+ flows) are discovered quickly without downloading gigabytes of clientdata.
+        Optionally filters out workflows matching ignore_name_patterns (e.g. ['CXP_']).
         """
         select_cols = (
             "workflowid,name,category,mode,statecode,statuscode,modifiedon,"
@@ -225,27 +231,46 @@ class DataverseClient:
         results: list[dict] = []
         next_url: str | None = url
 
+        clean_patterns = [
+            p.strip().lower() for p in (ignore_name_patterns or []) if p and p.strip()
+        ]
+
         try:
             while next_url:
                 res = self.session.get(next_url, headers=headers, timeout=60)
                 res.raise_for_status()
                 data = res.json()
-                results.extend(data.get("value", []))
+                page_items = data.get("value", [])
+                if clean_patterns:
+                    page_items = [
+                        w for w in page_items
+                        if not any(pat in str(w.get("name") or "").lower() for pat in clean_patterns)
+                    ]
+                results.extend(page_items)
                 next_url = data.get("@odata.nextLink")
             return results
         except Exception as exc:
             logging.warning("Failed to fetch workflows: %s", exc)
             return []
 
-    def get_workflows_touching_entity(self, entity_logical_name: str, include_inactive: bool = False) -> list[dict]:
+    def get_workflows_touching_entity(
+        self,
+        entity_logical_name: str,
+        include_inactive: bool = False,
+        ignore_name_patterns: list[str] | None = None,
+    ) -> list[dict]:
         """
         Targeted discovery of Cloud Flows and Classic Workflows touching a specific table.
         Attempts server-side FetchXML filter on clientdata and primaryentity first.
         Falls back to primaryentity OData query if clientdata FetchXML is restricted.
+        Optionally filters out workflows matching ignore_name_patterns (e.g. ['CXP_']).
         """
         if not entity_logical_name:
             return []
         norm_ent = entity_logical_name.strip().lower()
+        clean_patterns = [
+            p.strip().lower() for p in (ignore_name_patterns or []) if p and p.strip()
+        ]
 
         # 1. Try FetchXML to find workflows whose clientdata or primaryentity mentions the table
         state_cond = "" if include_inactive else "<condition attribute='statecode' operator='eq' value='1' />"
@@ -289,6 +314,11 @@ class DataverseClient:
                 data = res.json()
                 results = data.get("value", [])
                 if results:
+                    if clean_patterns:
+                        results = [
+                            w for w in results
+                            if not any(pat in str(w.get("name") or "").lower() for pat in clean_patterns)
+                        ]
                     return results
         except Exception as exc:
             logging.debug("FetchXML clientdata filter failed: %s, falling back to OData", exc)
@@ -307,9 +337,15 @@ class DataverseClient:
         try:
             res = self.session.get(url, headers=self.headers, timeout=45)
             if res.status_code == 200:
-                return res.json().get("value", [])
+                results = res.json().get("value", [])
+                if clean_patterns and results:
+                    results = [
+                        w for w in results
+                        if not any(pat in str(w.get("name") or "").lower() for pat in clean_patterns)
+                    ]
+                return results
         except Exception as exc:
-            logging.warning("OData fallback failed: %s", exc)
+            logging.warning("Failed to fetch touching workflows via OData: %s", exc)
         return []
 
     def get_workflow_clientdata(self, workflow_id: str) -> str | None:

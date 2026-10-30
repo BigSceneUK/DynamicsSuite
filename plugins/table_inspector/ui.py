@@ -4,6 +4,7 @@ import pandas as pd
 from streamlit.runtime.scriptrunner import add_script_run_ctx, get_script_run_ctx
 from .client import TableInspectorClient
 from core.context import AppContext
+from core.ui import render_dom_table
 
 def render_ui(ctx: AppContext):
     st.title("🧩 Table Inspector")
@@ -218,46 +219,46 @@ def render_ui(ctx: AppContext):
     if sel_scan_types:
         df_display = df_display[~df_display["Scan Type"].isin(sel_scan_types)]
 
-    # Display Table — row selection enabled so users can pick fields for full scan
-    table_event = st.dataframe(
+    # Display Table — DOM-native table with column sorting, filtering & selection
+    selected_items = render_dom_table(
         df_display,
+        key_prefix=f"ti_table_{lname}",
+        id_key="Logical Name",
+        selectable=True,
+        default_select_all=False,
+        columns=[
+            ("Display Name", "Display Name", 2.0),
+            ("Logical Name", "Logical Name", 1.8),
+            ("Attribute Type", "Type", 1.2),
+            ("Data Usage", "Data Usage", 1.8),
+            ("On Form(s)", "On Form(s)", 1.0),
+            ("Is Managed", "Managed", 0.9),
+            ("Scan Type", "Scan Type", 1.0),
+        ],
         column_config={
-            "Data Usage": st.column_config.ProgressColumn(
-                "Data Usage (%)",
-                help="Percentage of records where this field is not empty.",
-                format="%.2f",
-                min_value=0.0,
-                max_value=1.0,
-            ),
-            "On Form(s)": st.column_config.TextColumn("On Form(s)"),
-            "Scan Type": st.column_config.TextColumn(
-                "Scan Type",
-                help="'Sample' = estimated from up to 5,000 records; 'Full' = exact value from all records.",
-            ),
+            "Data Usage": {"type": "progress", "min": 0.0, "max": 1.0, "format": "%.1f%%"},
+            "On Form(s)": {"type": "badge"},
+            "Is Managed": {"type": "badge"},
+            "Scan Type": {"type": "badge"},
         },
-        use_container_width=True,
-        hide_index=True,
-        on_select="rerun",
-        selection_mode="multi-row",
-        key=f"ti_table_{lname}",
+        default_sort_col="Data Usage",
+        default_sort_desc=True,
+        empty_message="No attributes match the selected filters.",
     )
 
     st.caption(calc_info)
 
     # --- Full Scan section — driven by row selection in the table above ---
-    # selected_row_indices are positions within df_display (the filtered view).
-    # Map them back to actual Logical Names via df_display's own rows.
-    selected_row_indices = table_event.selection.rows if table_event and table_event.selection else []
+    selected_logical_names = [it["Logical Name"] for it in selected_items]
     source_data = st.session_state.get(f"ti_usage_source_{lname}", {})
     rows_for_full = [
-        df_display.iloc[i]["Logical Name"]
-        for i in selected_row_indices
-        if i < len(df_display) and source_data.get(df_display.iloc[i]["Logical Name"]) != "full"
+        name for name in selected_logical_names
+        if source_data.get(name) != "full"
     ]
 
-    if usage_cache_key in st.session_state and selected_row_indices:
+    if usage_cache_key in st.session_state and selected_logical_names:
         st.divider()
-        _sel_count = len(selected_row_indices)
+        _sel_count = len(selected_logical_names)
         _full_count = _sel_count - len(rows_for_full)
         if rows_for_full:
             st.caption(

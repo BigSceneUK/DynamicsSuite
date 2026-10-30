@@ -1,6 +1,11 @@
 {
   "audit_history": {
-    "enabled": true
+    "enabled": true,
+    "config": {
+      "ignore_flow_name_contains": [
+        "CXP_"
+      ]
+    }
   },
   "cloud_flow": {
     "enabled": true,

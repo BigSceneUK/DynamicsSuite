@@ -4,7 +4,10 @@ import html
 import json
 from pathlib import Path
 import streamlit as st
-import bleach
+try:
+    import bleach
+except ImportError:
+    bleach = None
 
 import config
 from core.plugin_base import PluginBase
@@ -55,7 +58,9 @@ def _safe_markdown(text: str) -> str:
     """
     if not text:
         return text
-    return bleach.clean(text, tags=_SAFE_TAGS, attributes=_SAFE_ATTRS, strip=True)
+    if bleach is not None:
+        return bleach.clean(text, tags=_SAFE_TAGS, attributes=_SAFE_ATTRS, strip=True)
+    return text
 
 
 
@@ -162,6 +167,9 @@ def _render_installed_tab(registry: PluginRegistry) -> None:
 
     st.divider()
 
+    # Active configuration dialog / panel (if user clicked "Config")
+    _handle_configure(registry)
+
     entries = registry.all_entries()
 
     if not entries:
@@ -210,7 +218,6 @@ def _render_installed_tab(registry: PluginRegistry) -> None:
 
     if not filtered_entries:
         st.info("No plugins match your filter criteria.")
-        _render_configure_dialog(registry)
         return
 
     if view_mode == "🃏 Card":
@@ -393,8 +400,6 @@ def _render_card_view(registry, entries) -> None:
 
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
-    _render_configure_dialog(registry)
-
 
 def _render_list_view(registry, entries) -> None:
     for entry in entries:
@@ -486,22 +491,50 @@ def _render_list_view(registry, entries) -> None:
 
         st.divider()
 
-    _render_configure_dialog(registry)
+
+def _on_dialog_dismiss() -> None:
+    st.session_state.pop("configuring_plugin_id", None)
 
 
-def _render_configure_dialog(registry: PluginRegistry) -> None:
+if hasattr(st, "dialog"):
+    @st.dialog("⚙️ Plugin Configuration", width="large", on_dismiss=_on_dialog_dismiss)
+    def _show_configure_dialog_modal(registry: PluginRegistry, plugin_id: str) -> None:
+        _render_configure_content(registry, plugin_id, is_modal=True)
+else:
+    def _show_configure_dialog_modal(*args, **kwargs) -> None:
+        pass
+
+
+def _handle_configure(registry: PluginRegistry) -> None:
     cfg_id = st.session_state.get("configuring_plugin_id")
     if not cfg_id:
         return
 
+    if hasattr(st, "dialog"):
+        _show_configure_dialog_modal(registry, cfg_id)
+    else:
+        _render_configure_content(registry, cfg_id, is_modal=False)
+
+
+def _render_configure_dialog(registry: PluginRegistry) -> None:
+    """Backward compatibility helper."""
+    _handle_configure(registry)
+
+
+def _render_configure_content(registry: PluginRegistry, cfg_id: str, is_modal: bool = False) -> None:
+    """Show configure UI either inside an st.dialog modal or as a top-level inline container."""
     entry = next((e for e in registry.all_entries() if e.plugin_id == cfg_id), None)
     if entry is None:
-        del st.session_state["configuring_plugin_id"]
+        st.session_state.pop("configuring_plugin_id", None)
+        st.error(f"Plugin '{cfg_id}' not found.")
         return
 
     p = entry.instance
-    st.markdown("---")
-    st.subheader(f"⚙️  Configure — {p.name}")
+    if not is_modal:
+        st.markdown("---")
+        st.subheader(f"⚙️  Configure — {p.name}")
+    else:
+        st.subheader(f"{p.icon}  {p.name}")
 
     col_meta, col_toggle = st.columns([7, 2])
     with col_meta:
@@ -519,6 +552,7 @@ def _render_configure_dialog(registry: PluginRegistry) -> None:
         if new_enabled != entry.enabled:
             registry.set_enabled(cfg_id, new_enabled)
             registry.save_config()
+            st.toast(f"{p.name} {'enabled' if new_enabled else 'disabled'}.", icon="⚙️")
             st.rerun()
 
     has_custom_ui = type(p).render_config is not PluginBase.render_config
@@ -533,11 +567,11 @@ def _render_configure_dialog(registry: PluginRegistry) -> None:
         _render_json_config_editor(registry, cfg_id, p)
 
     st.markdown("---")
-    if st.button("✖  Close", key="cfg_close"):
+    if st.button("✖  Close", key=f"cfg_close_{cfg_id}", use_container_width=True):
         st.session_state.pop(f"cfg_json_editor_{cfg_id}", None)
         st.session_state.pop(f"cfg_json_editor_{cfg_id}_pending", None)
         st.session_state.pop(f"cfg_json_editor_{cfg_id}_msg", None)
-        del st.session_state["configuring_plugin_id"]
+        st.session_state.pop("configuring_plugin_id", None)
         st.rerun()
 
 

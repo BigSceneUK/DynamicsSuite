@@ -10,6 +10,7 @@ import hashlib
 import io
 import json
 import logging
+from pathlib import Path
 import re
 import time
 import urllib.parse
@@ -20,6 +21,7 @@ import pandas as pd
 import streamlit as st
 
 from core.context import AppContext
+from core.ui import render_dom_table
 from plugins.audit_history.client import DataverseClient
 from plugins.audit_history.correlator import (
     AuditProcessCorrelator,
@@ -50,6 +52,80 @@ except ImportError:
         return {}
 
 from plugins.audit_history import persistence
+
+
+_DEFAULT_IGNORED_FLOW_PATTERNS = ["CXP_"]
+
+
+def _get_configured_ignore_flow_patterns() -> list[str]:
+    """Retrieve configured flow name substrings to ignore from plugin config or fallback."""
+    plugin = st.session_state.get("ah_plugin_instance")
+    if plugin is not None and hasattr(plugin, "get_config"):
+        try:
+            cfg = plugin.get_config()
+            if isinstance(cfg, dict):
+                pats = cfg.get("ignore_flow_name_contains") or cfg.get("ignored_flow_patterns")
+                if isinstance(pats, list):
+                    res = [str(p).strip() for p in pats if str(p).strip()]
+                    if res:
+                        return res
+                elif isinstance(pats, str) and pats.strip():
+                    return [p.strip() for p in pats.split(",") if p.strip()]
+        except Exception:
+            pass
+
+    # Direct fallback: check plugins_config.json
+    cfg_file = Path(__file__).resolve().parent.parent.parent / "plugins_config.json"
+    if cfg_file.exists():
+        try:
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                ah_cfg = data.get("audit_history", {}).get("config", {})
+                pats = ah_cfg.get("ignore_flow_name_contains") or ah_cfg.get("ignored_flow_patterns")
+                if isinstance(pats, list):
+                    res = [str(p).strip() for p in pats if str(p).strip()]
+                    if res:
+                        return res
+                elif isinstance(pats, str) and pats.strip():
+                    return [p.strip() for p in pats.split(",") if p.strip()]
+        except Exception:
+            pass
+
+    return list(_DEFAULT_IGNORED_FLOW_PATTERNS)
+
+
+def _save_configured_ignore_flow_patterns(patterns: list[str]) -> bool:
+    """Save updated ignore flow patterns to plugin configuration."""
+    clean_patterns = [str(p).strip() for p in patterns if str(p).strip()]
+    plugin = st.session_state.get("ah_plugin_instance")
+    if plugin is not None and hasattr(plugin, "save_config"):
+        try:
+            cfg = plugin.get_config() if hasattr(plugin, "get_config") else {}
+            if not isinstance(cfg, dict):
+                cfg = {}
+            cfg["ignore_flow_name_contains"] = clean_patterns
+            plugin.save_config(cfg)
+            return True
+        except Exception as exc:
+            logging.error("Failed to save config via plugin instance: %s", exc)
+
+    # Fallback: persist directly into plugins_config.json
+    cfg_file = Path(__file__).resolve().parent.parent.parent / "plugins_config.json"
+    try:
+        data = {}
+        if cfg_file.exists():
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        ah_item = data.setdefault("audit_history", {"enabled": True})
+        ah_cfg = ah_item.setdefault("config", {})
+        ah_cfg["ignore_flow_name_contains"] = clean_patterns
+        with open(cfg_file, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        return True
+    except Exception as exc:
+        logging.error("Failed to save config to plugins_config.json: %s", exc)
+        return False
+
 
 
 def _get_arm_token(ctx: AppContext) -> str | None:
@@ -339,10 +415,11 @@ def _render_history_manager() -> None:
         cols_to_show.append("step5_duration")
         rename_cols["step5_duration"] = "Analysis Duration"
 
-    st.dataframe(
+    render_dom_table(
         df_hist[cols_to_show].rename(columns=rename_cols),
-        width="stretch",
-        hide_index=True,
+        key_prefix="ah_saved_history_table",
+        default_sort_col="Saved Timestamp",
+        default_sort_desc=True,
     )
 
     filenames = [r["filename"] for r in records]
@@ -392,7 +469,10 @@ def _render_history_manager() -> None:
                 st.rerun()
 
 
-def render_page(ctx: AppContext, client: DataverseClient) -> None:
+def render_page(ctx: AppContext, client: DataverseClient, plugin: Any = None) -> None:
+    if plugin is not None:
+        st.session_state["ah_plugin_instance"] = plugin
+
     st.title("📜 Dataverse Audit History")
 
     # Banner for auto-save cache restoration
@@ -541,10 +621,10 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
         )
         display_cols = [c for c in display_cols if c in df_results.columns]
         rename_map = {c: metadata.get(c, c) for c in display_cols}
-        st.dataframe(
+        render_dom_table(
             df_results[display_cols].rename(columns=rename_map),
-            width="stretch",
-            hide_index=True,
+            key_prefix=f"ah_search_results_{selected_logical_name}",
+            empty_message="No records found matching search criteria.",
         )
 
     id_field = f"{selected_logical_name}id"
@@ -692,12 +772,20 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
         "Old Value",
         "New Value",
     ]
-    st.dataframe(df[display_cols], width="stretch", hide_index=True)
+    render_dom_table(
+        df[display_cols],
+        key_prefix="ah_audit_timeline_table",
+        default_sort_col="Changed Date",
+        default_sort_desc=True,
+    )
 
     with st.expander("🛠️ Technical Transaction Details"):
         tech_cols = ["Changed Date", "Transaction ID", "Extra Info"]
-        st.dataframe(
-            df[tech_cols].drop_duplicates(), width="stretch", hide_index=True
+        render_dom_table(
+            df[tech_cols].drop_duplicates(),
+            key_prefix="ah_tech_details_table",
+            default_sort_col="Changed Date",
+            default_sort_desc=True,
         )
 
     # Save results to named history section
@@ -732,6 +820,52 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
         "which exact flow triggered the update. This step correlates changed fields, timestamps, "
         "flow action steps (`clientdata`), and execution history (`flowruns` / `flowsessions` / `asyncoperations`)."
     )
+
+    ignored_flow_patterns = _get_configured_ignore_flow_patterns()
+
+    with st.expander("⚙️ Cloud Flow Exclusion Filters (JSON Config)", expanded=False):
+        st.markdown(
+            "Configure flow name substrings that should be **completely ignored** during Step 5 scan, "
+            "clientdata inspection, and execution correlation (e.g. `CXP_`)."
+        )
+        current_cfg_display = json.dumps({"ignore_flow_name_contains": ignored_flow_patterns}, indent=2)
+        ed_json = st.text_area(
+            "Exclusion Filter JSON:",
+            value=current_cfg_display,
+            height=130,
+            key="ah_ui_ignore_json",
+            help="Specify flow name substrings to exclude under 'ignore_flow_name_contains'."
+        )
+        col_c_save, col_c_reset, col_c_space = st.columns([1.5, 1.5, 4])
+        with col_c_save:
+            if st.button("💾 Save Filter", key="ah_btn_save_ignore_cfg"):
+                try:
+                    parsed_cfg = json.loads(ed_json)
+                    new_pats = parsed_cfg.get("ignore_flow_name_contains") or parsed_cfg.get("ignored_flow_patterns") or []
+                    if isinstance(new_pats, str):
+                        new_pats = [p.strip() for p in new_pats.split(",") if p.strip()]
+                    if _save_configured_ignore_flow_patterns(new_pats):
+                        st.session_state.pop("ah_all_workflows_cache", None)
+                        st.session_state.pop("ah_workflows_cached_with_inactive", None)
+                        st.session_state.pop("ah_workflows_cached_ignore_patterns", None)
+                        st.success(f"Saved! Ignored flow patterns: {new_pats}")
+                        st.rerun()
+                    else:
+                        st.error("Failed to persist filter configuration.")
+                except Exception as exc:
+                    st.error(f"Invalid JSON: {exc}")
+        with col_c_reset:
+            if st.button("↺ Reset Defaults", key="ah_btn_reset_ignore_cfg"):
+                if _save_configured_ignore_flow_patterns(_DEFAULT_IGNORED_FLOW_PATTERNS):
+                    st.session_state.pop("ah_all_workflows_cache", None)
+                    st.session_state.pop("ah_workflows_cached_with_inactive", None)
+                    st.session_state.pop("ah_workflows_cached_ignore_patterns", None)
+                    st.info(f"Reset filter to default: {_DEFAULT_IGNORED_FLOW_PATTERNS}")
+                    st.rerun()
+
+    if ignored_flow_patterns:
+        st.caption(f"🛡️ **Flow Exclusion Active**: Any flow containing **{', '.join(f'`{p}`' for p in ignored_flow_patterns)}** will be skipped during scan.")
+
 
     _PA_SCOPE = "https://service.flow.microsoft.com//.default"
     _ARM_SCOPE = "https://management.azure.com/user_impersonation"
@@ -987,21 +1121,53 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
 
                 raw_workflows = []
                 wf_by_id = {}
+                ignored_count = 0
+                clean_pats = [p.strip().lower() for p in (ignored_flow_patterns or []) if p and p.strip()]
+
+                def _is_flow_ignored(flow_name: str) -> bool:
+                    if not clean_pats:
+                        return False
+                    fn_lower = str(flow_name or "").lower()
+                    return any(pat in fn_lower for pat in clean_pats)
+
                 if include_cloud_flows or include_processes:
                     cached_wfs = st.session_state.get("ah_all_workflows_cache")
                     cached_inactive = st.session_state.get("ah_workflows_cached_with_inactive")
-                    if cached_wfs and len(cached_wfs) > 200 and cached_inactive == include_inactive:
+                    cached_pats = st.session_state.get("ah_workflows_cached_ignore_patterns")
+                    if (
+                        cached_wfs
+                        and len(cached_wfs) > 200
+                        and cached_inactive == include_inactive
+                        and cached_pats == clean_pats
+                    ):
                         raw_workflows = list(cached_wfs)
                     else:
-                        raw_workflows = client.get_workflows_for_entity(selected_logical_name, include_inactive=include_inactive)
+                        raw_workflows = client.get_workflows_for_entity(
+                            selected_logical_name,
+                            include_inactive=include_inactive,
+                            ignore_name_patterns=ignored_flow_patterns,
+                        )
                         if raw_workflows:
                             st.session_state["ah_all_workflows_cache"] = raw_workflows
                             st.session_state["ah_workflows_cached_with_inactive"] = include_inactive
+                            st.session_state["ah_workflows_cached_ignore_patterns"] = list(clean_pats)
+
+                    # Ensure any cached workflows also filter out ignored flows
+                    pre_filter_len = len(raw_workflows)
+                    raw_workflows = [w for w in raw_workflows if not _is_flow_ignored(w.get("name", ""))]
+                    ignored_count += (pre_filter_len - len(raw_workflows))
 
                     # Targeted FetchXML / OData query to catch flows whose clientdata / primaryentity references the table
                     wf_by_id = {clean_guid(w.get("workflowid")): w for w in raw_workflows if w.get("workflowid")}
-                    touching_results = client.get_workflows_touching_entity(selected_logical_name, include_inactive=include_inactive)
+                    touching_results = client.get_workflows_touching_entity(
+                        selected_logical_name,
+                        include_inactive=include_inactive,
+                        ignore_name_patterns=ignored_flow_patterns,
+                    )
                     for tw in touching_results:
+                        if _is_flow_ignored(tw.get("name", "")):
+                            ignored_count += 1
+                            continue
                         twid = clean_guid(tw.get("workflowid"))
                         if twid:
                             if twid in wf_by_id:
@@ -1023,10 +1189,19 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
                     cf_flows = st.session_state.get("cf_flows", [])
                     if cf_flows:
                         for cfw in cf_flows:
+                            if _is_flow_ignored(cfw.get("name", "")):
+                                ignored_count += 1
+                                continue
                             wid = clean_guid(cfw.get("workflowid"))
                             if wid and wid not in wf_by_id:
                                 raw_workflows.append(cfw)
                                 wf_by_id[wid] = cfw
+
+                if clean_pats and ignored_count > 0:
+                    st.write(
+                        f"   🛡️ Ignored **{ignored_count}** flow(s) matching configured exclusion filter "
+                        f"({', '.join(f'`{p}`' for p in ignored_flow_patterns)})."
+                    )
 
                 # Incorporate Logic Apps from inspector cache if enabled
                 if include_logic_apps:
@@ -1171,7 +1346,7 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
 
                 logic_client = None
                 arm_tok = _get_arm_token(ctx)
-                if arm_tok and LogicAppClient is not None:
+                if arm_tok:
                     try:
                         logic_client = LogicAppClient(arm_tok)
                     except Exception:
@@ -1536,6 +1711,7 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
                         logic_runs=logic_runs,
                         portal_sessions=portal_sessions,
                         portal_forms=portal_forms,
+                        ignore_name_patterns=ignored_flow_patterns,
                     )
                     st.session_state.pop("ah_correlation_results", None)
 
@@ -1566,6 +1742,7 @@ def render_page(ctx: AppContext, client: DataverseClient) -> None:
                         attr_metadata=fresh_meta,
                         tolerance_seconds=tolerance_sec,
                         raw_workflows=raw_workflows,
+                        ignore_name_patterns=ignored_flow_patterns,
                     )
                     st.session_state["ah_outbound_results"] = outbound_items
                     st.write(f"   🚀 **Step 3.3 Outbound Triggers**: Evaluated **{len(outbound_items)}** potential trigger impact(s) across candidate flow(s).")

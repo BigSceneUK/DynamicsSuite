@@ -3178,6 +3178,111 @@ class TestAuditCorrelator(unittest.TestCase):
         self.assertEqual(summary.process_url, "https://make.powerautomate.com/run-order-99")
         self.assertEqual(summary.mutation_count, 2)
 
+    def test_ignore_flow_name_patterns_in_prepare_execution_context(self):
+        """Verify that workflows matching ignore_name_patterns are excluded from candidate_flows."""
+        correlator = AuditProcessCorrelator()
+        wf_cxp = {
+            "workflowid": "wf-cxp-01",
+            "name": "CXP_Admissions - Offer Letters_202608171634",
+            "category": 5,
+            "statecode": 1,
+            "primaryentity": "contact",
+        }
+        wf_valid = {
+            "workflowid": "wf-valid-01",
+            "name": "Admissions Standard Notification",
+            "category": 5,
+            "statecode": 1,
+            "primaryentity": "contact",
+        }
+        candidates, _ = correlator.prepare_execution_context(
+            raw_workflows=[wf_cxp, wf_valid],
+            flow_runs=[],
+            flow_sessions=[],
+            async_operations=[],
+            target_entity_logical="contact",
+            ignore_name_patterns=["CXP_"],
+        )
+        self.assertEqual(len(candidates), 1)
+        self.assertEqual(candidates[0].workflow_id, "wf-valid-01")
+        self.assertEqual(candidates[0].name, "Admissions Standard Notification")
+
+    def test_ignore_flow_name_patterns_in_correlate_outbound(self):
+        """Verify that correlate_outbound excludes flows matching ignore_name_patterns."""
+        correlator = AuditProcessCorrelator()
+        audit_details = [
+            {
+                "AuditRecord": {
+                    "auditid": "aud-1",
+                    "transactionid": "tx-1",
+                    "createdon": "2026-10-10T10:00:00Z",
+                },
+                "ChangedField": "telephone1",
+                "OldValue": "111",
+                "NewValue": "222",
+            }
+        ]
+        wf_cxp = {
+            "workflowid": "wf-cxp-02",
+            "name": "CXP_Admissions - Result Day UG Deferred",
+            "category": 5,
+            "statecode": 1,
+            "primaryentity": "contact",
+            "triggeronupdateattributelist": "telephone1",
+        }
+        wf_valid = {
+            "workflowid": "wf-valid-02",
+            "name": "Sync Contact Phone to ERP",
+            "category": 5,
+            "statecode": 1,
+            "primaryentity": "contact",
+            "triggeronupdateattributelist": "telephone1",
+        }
+        items = correlator.correlate_outbound(
+            raw_audit_details=audit_details,
+            target_entity_logical="contact",
+            raw_workflows=[wf_cxp, wf_valid],
+            ignore_name_patterns=["CXP_"],
+        )
+        flow_names = [it.flow_name for it in items]
+        self.assertIn("Sync Contact Phone to ERP", flow_names)
+        self.assertNotIn("CXP_Admissions - Result Day UG Deferred", flow_names)
+
+    def test_ignore_flow_name_patterns_in_client(self):
+        """Verify DataverseClient.get_workflows_for_entity filters out flows matching ignore_name_patterns."""
+        from unittest.mock import MagicMock
+        from plugins.audit_history.client import DataverseClient
+
+        client = DataverseClient("https://org.crm.dynamics.com", "fake_token")
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.json.return_value = {
+            "value": [
+                {"workflowid": "w1", "name": "CXP_Admissions - Offer Letters", "category": 5},
+                {"workflowid": "w2", "name": "cxp_billing_notifier", "category": 5},
+                {"workflowid": "w3", "name": "Portal User Registration", "category": 5},
+            ]
+        }
+        client.session.get = MagicMock(return_value=mock_resp)
+
+        results = client.get_workflows_for_entity(
+            entity_logical_name="contact",
+            ignore_name_patterns=["CXP_"],
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["name"], "Portal User Registration")
+
+    def test_configured_ignore_patterns_helpers(self):
+        """Verify _get_configured_ignore_flow_patterns returns configured or default patterns."""
+        from plugins.audit_history.ui import (
+            _DEFAULT_IGNORED_FLOW_PATTERNS,
+            _get_configured_ignore_flow_patterns,
+        )
+        patterns = _get_configured_ignore_flow_patterns()
+        self.assertTrue(len(patterns) > 0)
+        self.assertIn("CXP_", patterns)
+
+
 
 if __name__ == "__main__":
     unittest.main()

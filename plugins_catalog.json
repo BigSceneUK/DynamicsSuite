@@ -1,7 +1,29 @@
 {
   "catalog_version": "1.0.0",
-  "updated_at": "2026-10-26T16:11:11Z",
+  "updated_at": "2026-10-30T09:05:39Z",
   "plugins": [
+    {
+      "id": "record_transporter",
+      "name": "Record Transporter",
+      "version": "1.0.1",
+      "author": "DynamicsSuite Team",
+      "released_by": "DynamicsSuite Team",
+      "release_date": "2026-10-29",
+      "description": "Transfer records between different environments, resolving missing lookup dependencies interactively.",
+      "icon": "🚚",
+      "download_url": "https://bigscene.uk/DynamicsSuite/releases/record_transporter.zip",
+      "sha256": "58a2ef19a3063aaa20282db779e9d59613be05b5dd419e43d90446e27df463cd",
+      "tags": [
+        "Migration",
+        "Dataverse",
+        "Transporter"
+      ],
+      "repo_url": "",
+      "issues_url": "",
+      "doc_url": "",
+      "support_email": "support@bigscene.uk",
+      "readme": "# 🚚 Record Transporter\n\n> **Move configuration records and reference data between Microsoft Dataverse environments with interactive lookup dependency resolution.**\n\nMigrating configuration data (such as product catalogs, price lists, portal web pages, tax tables, and custom lookup entities) between Development, Test, and Production environments often fails because of missing foreign key lookups and broken GUID references.\n\nThe **Record Transporter** eliminates manual Excel imports and tedious GUID mapping by querying records from your source environment, analyzing referenced lookups, and interactively resolving or creating missing dependencies in the target environment.\n\n---\n\n## 🌟 Key Features\n\n* **Cross-Environment Migration**: Transport records directly between any two Dataverse tenants or environments without exporting static CSVs.\n* **Interactive Lookup Dependency Resolution**: Automatically detects foreign key lookup fields (e.g., Parent Account, Category, Currency, Owner) and checks if the referenced record exists in the target environment.\n* **Missing Record Prompting**: If a referenced record is missing in target, you can choose to transport the parent record on-the-fly or map it to an existing target record.\n* **Preserve Primary GUIDs**: Preserves exact record GUIDs (`Id`) to guarantee cross-environment parity and prevent duplicate configuration rows.\n* **Intelligent Upsert Mode**: Updates existing records if already present or inserts net-new records using alternate keys or primary GUIDs.\n* **Batch Execution & Safety Validation**: Pre-validates payloads before applying changes, reporting validation errors before committing writes.\n\n---\n\n## 📋 Prerequisites & Permissions\n\n1. **Environment Access**:\n   * Access to both a **Source** Dataverse environment and a **Target** Dataverse environment.\n2. **User Privileges**:\n   * **Source Environment**: **Read** privileges on the tables being exported and their related lookup tables.\n   * **Target Environment**: **Create** and **Write** privileges on the target tables.\n   * *System Customizer* or *Environment Maker* role is typically required.\n\n---\n\n## 🚀 How to Use\n\n### 1. Configure Source & Target Environments\n1. Select your **Source Environment** from the DynamicsSuite connection panel.\n2. Authenticate to your **Target Environment** when prompted by the plugin.\n\n### 2. Query & Select Records\n1. Select the Dataverse table you wish to transport (e.g. `pricelevel`, `adx_webtemplate`, `custom_taxcode`).\n2. Filter records using a query or view.\n3. Select the records you wish to migrate using the interactive checkbox grid.\n\n### 3. Review Lookup Dependencies\n1. The plugin scans all foreign key lookup fields on the selected records.\n2. The dependency resolver flags:\n   * 🟢 **Resolved Lookups**: The referenced record exists in the target environment with matching GUID or primary name.\n   * 🟡 **Missing Lookups**: The referenced record exists only in source.\n3. For missing lookups, choose your strategy:\n   * **Include in Transport**: Automatically package and transport the referenced parent record first.\n   * **Map to Existing**: Point the lookup to an alternative existing record in target.\n\n### 4. Execute Transport & Verify\n1. Click **🚀 Transport Records**.\n2. A real-time progress bar tracks each batch upsert operation.\n3. Upon completion, a summary report confirms successful creations and updates, along with any validation warnings.\n\n---\n\n## 💡 Best Practice Tips\n\n* **Transport Order**: For complex hierarchies, transport lookup tables (e.g., Categories, Units, Currencies) before transporting primary entity records.\n* **System Attributes**: Read-only system fields (such as `createdon`, `modifiedon`, `versionnumber`) are automatically stripped before sending updates to the target API to avoid Dataverse validation errors.\n"
+    },
     {
       "id": "portal_webapi_auditor",
       "name": "Power Page API Wildcard Auditor",
@@ -57,7 +79,7 @@
       "description": "Inspect table attributes, metadata, form placement, and data usage statistics.",
       "icon": "🔍",
       "download_url": "https://bigscene.uk/DynamicsSuite/releases/table_inspector.zip",
-      "sha256": "ea8a05e512019b0d94a21853a0eb0ccc43fe7a412a40bc995a4674f7af8db4b6",
+      "sha256": "6e5d70be4814c4bce5d631ccd5e66950a4ac664eede038e76f9d4e540354f871",
       "tags": [
         "Metadata",
         "Dataverse",
@@ -101,7 +123,7 @@
       "description": "Browse field-level Dataverse record changes (who changed what and when), and correlate updates to identify the responsible Cloud Flows and Classic Processes.",
       "icon": "📜",
       "download_url": "https://bigscene.uk/DynamicsSuite/releases/audit_history.zip",
-      "sha256": "092f164c35280ea16b33719c76dbda8cdc61d7c20f437363da04e93890eeeaec",
+      "sha256": "15fa5df90c28e25d088c9635c2eea39c9b5a71abf91bb7247aa63b1e722bc0fa",
       "tags": [
         "Audit",
         "History",
@@ -114,28 +136,6 @@
       "readme": "# 📜 Audit History Explorer\n\n> **Deep-dive field-level change auditing for Microsoft Dataverse & Dynamics 365 records.**\n\nThe **Audit History Explorer** enables Functional Consultants, System Customizers, Compliance Officers, and Developers to inspect, trace, and report on historical changes made to Dataverse records. Easily determine **who changed what, when it happened, and from which value to which**, with one-click export to Excel and CSV.\n\n---\n\n## 🌟 Key Features\n\n* **Table-Level Discovery**: Automatically discovers all audit-enabled tables in your Dataverse environment.\n* **Flexible Multi-Field Filtering**: Search records by primary name, email, code, status, or any custom attribute without writing FetchXML.\n* **Chronological Audit Timeline**: Displays every event in order, including Creates, Updates, Deactivations, Activations, Assignments, and Shares.\n* **Old vs. New Value Diff Viewer**: Highlights the exact field-level state before and after each change.\n* **Action Code Decoding**: Translates numeric Dataverse audit codes into intuitive business labels (e.g. *Update*, *Deactivate*, *Assign*, *Share*).\n* **Export for Compliance & Reporting**: Export audit history logs to CSV or Excel for compliance audits, governance reviews, and security incident investigations.\n\n---\n\n## 📋 Prerequisites & Permissions\n\n1. **Dataverse Auditing Enabled**:\n   * Global auditing must be enabled on your Power Platform environment (*Power Platform Admin Center → Environments → Settings → Audit and logs → Audit settings*).\n   * Auditing must be turned on for the target table (*Power Apps Maker Portal → Table Properties → Advanced options → Audit changes to its data*).\n2. **User Privileges**:\n   * Your Microsoft Entra ID user account requires **Read** permission on the target table.\n   * Your user account requires the **View Audit History** (`prvReadAudit`) privilege (included in *System Administrator*, *System Customizer*, and standard auditor roles).\n\n---\n\n## 🚀 How to Use\n\n### 1. Select a Table\n1. Connect to your Dataverse environment in the DynamicsSuite sidebar.\n2. In the plugin, select the table you wish to audit (e.g., *Account*, *Contact*, or a custom table).\n3. The plugin will automatically query Dataverse metadata to retrieve audit-enabled tables and available fields.\n\n### 2. Find the Target Record\n1. Use the **Filter Builder** to locate the specific record.\n2. Search by primary attribute (e.g., Account Name) or add additional filters (e.g., *Email Address*, *Created On*, *Status*).\n3. Click **Search Records** and select the record from the results table.\n\n### 3. Review Historical Changes\n1. The chronological timeline displays all modification events for the selected record.\n2. Expand any audit entry to inspect:\n   * **Modified On**: Timestamp in your local timezone.\n   * **Changed By**: Display name and email of the user or system process that executed the change.\n   * **Action**: Create, Update, Delete, Assign, Share, Status Change.\n   * **Attribute**: Field logical and display name.\n   * **Old Value ➔ New Value**: Clear side-by-side transition.\n\n### 4. Export Audit Log\n* Click **📥 Export to CSV** or **📊 Export to Excel** to save the complete record history for offline analysis or compliance evidence.\n\n---\n\n## ⚙️ Technical Details\n\n* **API Endpoints**: Uses standard Microsoft Dataverse Web API `RetrieveRecordChangeHistory` and `audits` entity sets.\n* **Authentication**: Seamless Microsoft Entra ID token acquisition via DynamicsSuite `AppContext`.\n* **Zero Disk Footprint**: Audit logs are streamed directly into memory; no customer data is cached on disk.\n"
     },
     {
-      "id": "record_transporter",
-      "name": "Record Transporter",
-      "version": "1.0.0",
-      "author": "DynamicsSuite Team",
-      "released_by": "DynamicsSuite Team",
-      "release_date": "2026-09-01",
-      "description": "Transfer records between different environments, resolving missing lookup dependencies interactively.",
-      "icon": "🚚",
-      "download_url": "https://bigscene.uk/DynamicsSuite/releases/record_transporter.zip",
-      "sha256": "0d9716b7f7af09da6c6a5b9dfb138e0098f909c2adeeae2e628ce8afd15fcf4c",
-      "tags": [
-        "Migration",
-        "Dataverse",
-        "Transporter"
-      ],
-      "repo_url": "",
-      "issues_url": "",
-      "doc_url": "",
-      "support_email": "support@bigscene.uk",
-      "readme": "# 🚚 Record Transporter\n\n> **Move configuration records and reference data between Microsoft Dataverse environments with interactive lookup dependency resolution.**\n\nMigrating configuration data (such as product catalogs, price lists, portal web pages, tax tables, and custom lookup entities) between Development, Test, and Production environments often fails because of missing foreign key lookups and broken GUID references.\n\nThe **Record Transporter** eliminates manual Excel imports and tedious GUID mapping by querying records from your source environment, analyzing referenced lookups, and interactively resolving or creating missing dependencies in the target environment.\n\n---\n\n## 🌟 Key Features\n\n* **Cross-Environment Migration**: Transport records directly between any two Dataverse tenants or environments without exporting static CSVs.\n* **Interactive Lookup Dependency Resolution**: Automatically detects foreign key lookup fields (e.g., Parent Account, Category, Currency, Owner) and checks if the referenced record exists in the target environment.\n* **Missing Record Prompting**: If a referenced record is missing in target, you can choose to transport the parent record on-the-fly or map it to an existing target record.\n* **Preserve Primary GUIDs**: Preserves exact record GUIDs (`Id`) to guarantee cross-environment parity and prevent duplicate configuration rows.\n* **Intelligent Upsert Mode**: Updates existing records if already present or inserts net-new records using alternate keys or primary GUIDs.\n* **Batch Execution & Safety Validation**: Pre-validates payloads before applying changes, reporting validation errors before committing writes.\n\n---\n\n## 📋 Prerequisites & Permissions\n\n1. **Environment Access**:\n   * Access to both a **Source** Dataverse environment and a **Target** Dataverse environment.\n2. **User Privileges**:\n   * **Source Environment**: **Read** privileges on the tables being exported and their related lookup tables.\n   * **Target Environment**: **Create** and **Write** privileges on the target tables.\n   * *System Customizer* or *Environment Maker* role is typically required.\n\n---\n\n## 🚀 How to Use\n\n### 1. Configure Source & Target Environments\n1. Select your **Source Environment** from the DynamicsSuite connection panel.\n2. Authenticate to your **Target Environment** when prompted by the plugin.\n\n### 2. Query & Select Records\n1. Select the Dataverse table you wish to transport (e.g. `pricelevel`, `adx_webtemplate`, `custom_taxcode`).\n2. Filter records using a query or view.\n3. Select the records you wish to migrate using the interactive checkbox grid.\n\n### 3. Review Lookup Dependencies\n1. The plugin scans all foreign key lookup fields on the selected records.\n2. The dependency resolver flags:\n   * 🟢 **Resolved Lookups**: The referenced record exists in the target environment with matching GUID or primary name.\n   * 🟡 **Missing Lookups**: The referenced record exists only in source.\n3. For missing lookups, choose your strategy:\n   * **Include in Transport**: Automatically package and transport the referenced parent record first.\n   * **Map to Existing**: Point the lookup to an alternative existing record in target.\n\n### 4. Execute Transport & Verify\n1. Click **🚀 Transport Records**.\n2. A real-time progress bar tracks each batch upsert operation.\n3. Upon completion, a summary report confirms successful creations and updates, along with any validation warnings.\n\n---\n\n## 💡 Best Practice Tips\n\n* **Transport Order**: For complex hierarchies, transport lookup tables (e.g., Categories, Units, Currencies) before transporting primary entity records.\n* **System Attributes**: Read-only system fields (such as `createdon`, `modifiedon`, `versionnumber`) are automatically stripped before sending updates to the target API to avoid Dataverse validation errors.\n"
-    },
-    {
       "id": "cloud_flow",
       "name": "Cloud Flow",
       "version": "1.0.0",
@@ -145,7 +145,7 @@
       "description": "Browse execution history for solution-aware Cloud Flows. Search by flow name or date range via the Dataverse API, with optional Power Automate API for richer run details.",
       "icon": "⚡",
       "download_url": "https://bigscene.uk/DynamicsSuite/releases/cloud_flow.zip",
-      "sha256": "8659a5039e861d3791a427a8f7b8cb04ef34c6066e96114cca7625f1adb45eac",
+      "sha256": "26e7a1ec45ee5f017f93ca4d349e12b3213c30f78af842b479031f2956ff5a40",
       "tags": [
         "Power Automate",
         "Flow",

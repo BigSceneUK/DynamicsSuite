@@ -6,8 +6,8 @@ class RecordTransporterPlugin(PluginBase):
     name = "Record Transporter"
     icon = "🚚"
     description = "Transfer records between different environments, resolving missing lookup dependencies interactively."
-    version = "1.0.0"
-    release_date = "2026-09-01"
+    version = "1.0.1"
+    release_date = "2026-10-29"
     author = "DynamicsSuite Team"
     released_by = "DynamicsSuite Team"
     tags = ["Migration", "Dataverse", "Transporter"]

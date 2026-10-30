@@ -1,0 +1,5 @@
+{
+  "ignore_flow_name_contains": [
+    "CXP_"
+  ]
+}

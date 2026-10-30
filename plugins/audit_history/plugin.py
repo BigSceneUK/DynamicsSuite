@@ -20,6 +20,11 @@ class AuditHistoryPlugin(PluginBase):
     released_by = "DynamicsSuite Team"
     tags = ["Audit", "History", "Compliance"]
     requires_graph = False
+    default_config = {
+        "ignore_flow_name_contains": [
+            "CXP_"
+        ]
+    }
 
     def render(self, ctx: AppContext) -> None:
         if not ctx.org_url:
@@ -37,4 +42,4 @@ class AuditHistoryPlugin(PluginBase):
             return
 
         client = ah_module.DataverseClient(ctx.org_url, token)
-        ui.render_page(ctx, client)
+        ui.render_page(ctx, client, plugin=self)

@@ -3,6 +3,7 @@ import pandas as pd
 import logging
 from typing import List, Dict, Any, Tuple
 from core.context import AppContext
+from core.ui import render_dom_table, render_dom_selectable_table
 from .client import RecordTransporterClient
 
 # Custom styling for premium appearance
@@ -221,7 +222,12 @@ def render_ui(ctx: AppContext) -> None:
                 # Pre-check standard/custom writable fields
                 default_checked = select_all
                 # Don't check system read-only fields by default
-                if attr["LogicalName"] in ("createdon", "modifiedon", "versionnumber", "createdby", "modifiedby", "owninguser", "owningteam", "owningbusinessunit"):
+                if attr["LogicalName"] in (
+                    "createdon", "modifiedon", "versionnumber", "createdby", "modifiedby", 
+                    "owninguser", "owningteam", "owningbusinessunit", "createdonbehalfby", 
+                    "modifiedonbehalfby", "overriddencreatedon", "importsequencenumber",
+                    "timezoneruleversionnumber", "utcconversiontimezonecode"
+                ):
                     default_checked = False
 
                 checked = st.checkbox(
@@ -277,31 +283,46 @@ def render_ui(ctx: AppContext) -> None:
 
     st.markdown(f"Found **{len(source_records)}** record(s). Select the ones you want to transfer:")
     
-    # We construct a table editor with a checkbox selector
+    # DOM-native selectable table for source records
+    preview_cols = []
+    if primary_name_attr:
+        preview_cols.append(("Name", "Name", 2.2))
+    preview_cols.append(("GUID", "GUID", 2.0))
+
+    extra_preview_attrs = [
+        attr for attr in selected_attrs[:5]
+        if attr != pk_attr and attr != primary_name_attr
+    ]
+    for attr in extra_preview_attrs:
+        preview_cols.append((attr, attr, 1.5))
+
     preview_rows = []
-    for rec in source_records:
+    for idx, rec in enumerate(source_records):
+        guid_val = str(rec.get(pk_attr) or f"row_{idx}")
         row = {
-            "Select": True,
-            "GUID": rec.get(pk_attr),
+            "_orig_rec": rec,
+            "_row_id": guid_val,
+            "GUID": str(rec.get(pk_attr) or ""),
         }
         if primary_name_attr:
             row["Name"] = rec.get(primary_name_attr) or "(No Name)"
-        
-        # Add values of other key attributes for preview
-        for attr in selected_attrs[:5]:  # Preview up to 5 attributes
-            if attr != pk_attr and attr != primary_name_attr:
-                val = rec.get(attr)
-                if val is None:
-                    val = rec.get(f"_{attr}_value")
-                row[attr] = str(val) if val is not None else ""
+
+        for attr in extra_preview_attrs:
+            val = rec.get(attr)
+            if val is None:
+                val = rec.get(f"_{attr}_value")
+            row[attr] = str(val) if val is not None else ""
         preview_rows.append(row)
 
-    df_preview = pd.DataFrame(preview_rows)
-    edited_df = st.data_editor(df_preview, width='stretch', hide_index=True, key="rt_record_editor")
-    
-    # Identify which records are selected
-    selected_indices = edited_df.index[edited_df["Select"] == True].tolist()
-    records_to_transfer = [source_records[i] for i in selected_indices]
+    selected_rows = render_dom_selectable_table(
+        items=preview_rows,
+        id_key="_row_id",
+        columns=preview_cols,
+        key_prefix="rt_source_records",
+        default_select_all=True,
+        empty_message="No source records found.",
+    )
+    records_to_transfer = [r["_orig_rec"] for r in selected_rows]
 
     st.markdown(f"**{len(records_to_transfer)}** record(s) selected for transfer.")
     st.divider()
@@ -377,21 +398,24 @@ def render_ui(ctx: AppContext) -> None:
     missing_lookups = st.session_state["rt_missing_lookups"]
     lookups_to_transfer = []
     if missing_lookups:
-        df_missing = pd.DataFrame(missing_lookups)
-        edited_missing_df = st.data_editor(
-            df_missing, 
-            width='stretch', 
-            hide_index=True, 
-            key="rt_missing_lookups_editor",
-            column_config={
-                "EntitySetName": None # Hide entity set name column
-            }
+        for idx, item in enumerate(missing_lookups):
+            if "_lookup_uid" not in item:
+                item["_lookup_uid"] = f"{item.get('Entity', '')}:{item.get('GUID', '')}_{idx}"
+
+        lookup_cols = [
+            ("Entity", "Entity", 1.8),
+            ("Name", "Name", 2.2),
+            ("GUID", "GUID", 2.0),
+        ]
+
+        lookups_to_transfer = render_dom_selectable_table(
+            items=missing_lookups,
+            id_key="_lookup_uid",
+            columns=lookup_cols,
+            key_prefix="rt_missing_lookups",
+            default_select_all=True,
+            empty_message="No missing lookup records found.",
         )
-        
-        # Filter selected missing lookups to transfer
-        selected_lookup_indices = edited_missing_df.index[edited_missing_df["Select"] == True].tolist()
-        lookups_to_transfer = [missing_lookups[i] for i in selected_lookup_indices]
-        
         st.info(f"**{len(lookups_to_transfer)}** missing lookup record(s) will be created in target before the main records transfer.")
 
     st.divider()
@@ -503,8 +527,16 @@ def render_ui(ctx: AppContext) -> None:
                         for k, v in src_rec_details.items():
                             if k.startswith("_") or k in (
                                 "createdon", "modifiedon", "versionnumber", "createdby", "modifiedby", 
-                                "owninguser", "owningteam", "owningbusinessunit", f"{entity_name}id"
+                                "owninguser", "owningteam", "owningbusinessunit", "createdonbehalfby",
+                                "modifiedonbehalfby", "overriddencreatedon", "importsequencenumber",
+                                "timezoneruleversionnumber", "utcconversiontimezonecode", f"{entity_name}id"
                             ):
+                                continue
+
+                            # Skip shadow attributes that are not real columns
+                            if k.endswith("name") and k not in ("name", f"{entity_name}name", f"{entity_name}_name"):
+                                continue
+                            if k.endswith("yominame"):
                                 continue
                             
                             # Standard fields
@@ -583,8 +615,16 @@ def render_ui(ctx: AppContext) -> None:
                                 continue
                             if attr in (
                                 "createdon", "modifiedon", "versionnumber", "createdby", "modifiedby", 
-                                "owninguser", "owningteam", "owningbusinessunit"
+                                "owninguser", "owningteam", "owningbusinessunit", "createdonbehalfby",
+                                "modifiedonbehalfby", "overriddencreatedon", "importsequencenumber",
+                                "timezoneruleversionnumber", "utcconversiontimezonecode"
                             ):
+                                continue
+
+                            # Skip virtual shadow attributes that cannot be set directly
+                            if attr.endswith("name") and attr not in ("name", f"{selected_logical_name}name", f"{selected_logical_name}_name", primary_name_attr):
+                                continue
+                            if attr.endswith("yominame"):
                                 continue
                             
                             is_lookup = attr in lookup_metadata
@@ -670,4 +710,18 @@ def render_ui(ctx: AppContext) -> None:
         with col_total:
             st.metric("Total Executed", len(df_report[df_report["Status"] != "INFO"]))
             
-        st.dataframe(df_report, width='stretch', hide_index=True)
+        render_dom_table(
+            df_report,
+            key_prefix="rt_report_table",
+            columns=[
+                ("Status", "Status", 1.0),
+                ("Action", "Action", 1.2),
+                ("Entity", "Entity", 1.2),
+                ("Name", "Name", 2.0),
+                ("Detail", "Detail", 2.5),
+            ],
+            column_config={
+                "Status": {"type": "badge"},
+            },
+            default_sort_col="Status",
+        )

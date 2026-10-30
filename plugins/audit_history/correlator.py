@@ -1274,9 +1274,19 @@ class AuditProcessCorrelator:
         logic_runs: Optional[List[Dict[str, Any]]] = None,
         portal_sessions: Optional[List[Dict[str, Any]]] = None,
         portal_forms: Optional[List[Dict[str, Any]]] = None,
+        ignore_name_patterns: Optional[List[str]] = None,
     ) -> Tuple[List[CorrelatedFlow], List[FlowRunExecution]]:
         """Parses flow definitions, portal forms, and runs into indexed candidate_flows and executions without downloading payloads."""
         norm_target = target_entity_logical.strip().lower()
+
+        clean_patterns = [
+            p.strip().lower() for p in (ignore_name_patterns or []) if p and p.strip()
+        ]
+        if clean_patterns:
+            raw_workflows = [
+                w for w in raw_workflows
+                if not any(pat in str(w.get("name") or "").lower() for pat in clean_patterns)
+            ]
 
         # 1. Parse workflows into candidate flows
         candidate_flows: List[CorrelatedFlow] = []
@@ -2475,6 +2485,7 @@ class AuditProcessCorrelator:
         raw_workflows: Optional[List[Dict[str, Any]]] = None,
         focus_workflow_ids: Optional[Set[str]] = None,
         focus_keywords: Optional[List[str]] = None,
+        ignore_name_patterns: Optional[List[str]] = None,
     ) -> List[OutboundTriggerItem]:
         """
         Evaluate downstream automations (Cloud Flows, Classic Workflows, Logic Apps)
@@ -2485,10 +2496,25 @@ class AuditProcessCorrelator:
         """
         norm_target = target_entity_logical.strip().lower()
 
+        clean_patterns = [
+            p.strip().lower() for p in (ignore_name_patterns or []) if p and p.strip()
+        ]
+        if clean_patterns and raw_workflows:
+            raw_workflows = [
+                w for w in raw_workflows
+                if not any(pat in str(w.get("name") or "").lower() for pat in clean_patterns)
+            ]
+
         if candidate_flows is None:
             candidate_flows = self.candidate_flows
         if (not candidate_flows) and raw_workflows:
             candidate_flows = [extract_flow_definition(w, norm_target) for w in raw_workflows]
+
+        if clean_patterns and candidate_flows:
+            candidate_flows = [
+                cf for cf in candidate_flows
+                if not any(pat in (cf.name or "").lower() for pat in clean_patterns)
+            ]
 
         if executions is None:
             executions = self.executions
