@@ -14,7 +14,6 @@ import pandas as pd
 import streamlit as st
 
 from core.context import AppContext
-from core.ui import render_dom_table
 from plugins.cloud_flow import persistence
 from plugins.cloud_flow.client import (
     DataverseClient,
@@ -359,6 +358,13 @@ def _render_date_range_tab(ctx: AppContext, client: DataverseClient) -> None:
     today = pd.Timestamp.utcnow().date()
     yesterday = today - pd.Timedelta(days=_DEFAULT_DAYS_BACK)
 
+    def _set_last_7_days() -> None:
+        now_date = pd.Timestamp.utcnow().date()
+        st.session_state["cf_start_date"] = now_date - pd.Timedelta(days=7)
+        st.session_state["cf_end_date"] = now_date
+        st.session_state["cf_start_time"] = "00:00"
+        st.session_state["cf_end_time"] = "23:59"
+
     col1, col2 = st.columns(2)
     with col1:
         start_date = st.date_input("Start Date", value=yesterday, key="cf_start_date")
@@ -367,12 +373,7 @@ def _render_date_range_tab(ctx: AppContext, client: DataverseClient) -> None:
         end_date = st.date_input("End Date", value=today, key="cf_end_date")
         end_time = st.text_input("End Time (HH:MM)", value="23:59", key="cf_end_time")
 
-    if st.button("\U0001f4c5 Last 7 Days", key="cf_preset_7d"):
-        st.session_state["cf_start_date"] = today - pd.Timedelta(days=7)
-        st.session_state["cf_end_date"] = today
-        st.session_state["cf_start_time"] = "00:00"
-        st.session_state["cf_end_time"] = "23:59"
-        st.rerun()
+    st.button("\U0001f4c5 Last 7 Days", key="cf_preset_7d", on_click=_set_last_7_days)
 
     try:
         start_dt = pd.Timestamp(f"{start_date} {start_time}").isoformat() + "Z"
@@ -821,34 +822,15 @@ def _render_results_section(run_data: list[dict], state_key: str) -> None:
             return ""
         return _fmt_duration(int(x))
 
-    cols = []
-    for c in f_df.columns:
-        if c == _RUN_LINK_COL:
-            cols.append((c, "Open Run", 1.0))
-        elif c == "starttime":
-            cols.append((c, "Started", 1.8))
-        elif c == "endtime":
-            cols.append((c, "Completed", 1.8))
-        elif c == "duration":
-            cols.append((c, "Duration", 1.2))
-        elif c == "status":
-            cols.append((c, "Status", 1.2))
-        else:
-            cols.append((c, c, 1.5))
-
-    render_dom_table(
-        f_df,
-        key_prefix=f"cf_runs_table_{state_key}",
-        columns=cols,
-        column_config={
-            "status": {"type": "badge"},
-        },
-        formatters={
-            "duration": lambda d: _dur_fmt(d) if d else "—",
-        },
-        default_sort_col="Started" if "starttime" in f_df.columns else None,
-        default_sort_desc=True,
-    )
+    styled = f_df.style.apply(_style_row, axis=1).format({"duration": _dur_fmt}, na_rep="")
+    col_cfg: dict = {
+        "starttime": st.column_config.DatetimeColumn("Started", format="D MMM YYYY, h:mm a"),
+        "endtime": st.column_config.DatetimeColumn("Completed", format="D MMM YYYY, h:mm a"),
+        "duration": st.column_config.Column("Duration"),
+        "status": st.column_config.TextColumn("Status"),
+        _RUN_LINK_COL: st.column_config.LinkColumn("Open Run", display_text="View"),
+    }
+    st.dataframe(styled, use_container_width=True, hide_index=True, column_config=col_cfg)
 
     if "full_fetch_xml" in df.columns:
         with st.expander("\U0001f4c4 View Full Fetch XML"):
@@ -1101,13 +1083,11 @@ def _render_history_manager(key_prefix: str = "") -> None:
         return
 
     df_hist = pd.DataFrame(records)
-    render_dom_table(
+    st.dataframe(
         df_hist[["name", "timestamp", "remark", "Fetched Detail", "count"]].rename(
             columns={"name": "Name", "timestamp": "Saved At", "remark": "Remark", "count": "Runs"}
         ),
-        key_prefix=f"cf_hist_{key_prefix}",
-        default_sort_col="Saved At",
-        default_sort_desc=True,
+        use_container_width=True, hide_index=True,
     )
 
     filenames = [r["filename"] for r in records]

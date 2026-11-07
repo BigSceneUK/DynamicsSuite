@@ -1,20 +1,16 @@
 {
   "audit_history": {
     "enabled": true,
-    "config": {
-      "ignore_flow_name_contains": [
-        "CXP_"
-      ]
-    }
+    "config": {}
   },
   "cloud_flow": {
     "enabled": true,
     "config": {
       "detail_fields": [
-        "app_application",
-        "app_applicantid",
-        "app_applicationreference",
-        "app_bannerid"
+        "Operation",
+        "Fetch XML",
+        "Update Action",
+        "Update Payload"
       ]
     }
   },
@@ -32,5 +28,12 @@
   },
   "table_inspector": {
     "enabled": true
+  },
+  "mcp_server": {
+    "enabled": true,
+    "config": {
+      "port": 58999,
+      "auto_start": true
+    }
   }
 }

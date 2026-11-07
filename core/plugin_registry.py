@@ -118,6 +118,10 @@ class PluginRegistry:
                             line = line.strip()
                             if not line or line.startswith("#"):
                                 continue
+                            # Strip trailing inline comments before parsing
+                            line = line.split("#")[0].strip()
+                            if not line:
+                                continue
                             try:
                                 from packaging.requirements import Requirement
                                 req = Requirement(line)
@@ -210,9 +214,15 @@ class PluginRegistry:
         if not req_file.exists():
             return True
 
+        python_bin = sys.executable
+        repo_root = Path(__file__).parent.parent
+        venv_bin = repo_root / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+        if venv_bin.exists():
+            python_bin = str(venv_bin)
+
         try:
             result = subprocess.run(
-                [sys.executable, "-m", "pip", "install", "-r", str(req_file)],
+                [python_bin, "-m", "pip", "install", "-r", str(req_file)],
                 capture_output=True,
                 text=True,
                 check=True
@@ -222,7 +232,7 @@ class PluginRegistry:
             entry.load_error = None
             entry.missing_deps = []
             
-            self.discover()
+            self.discover(force=True)
             return True
         except subprocess.CalledProcessError as err:
             logging.error("Failed to install dependencies for %s: %s", plugin_id, err.stderr)

@@ -13,8 +13,8 @@ class PortalInspectorPlugin(PluginBase):
         "Explore component hierarchies, forms, and templates in Power Pages portals "
         "using the Page Structure Explorer."
     )
-    version = "1.1.0"
-    release_date = "2026-09-08"
+    version = "1.2.0"
+    release_date = "2026-11-07"
     author = "DynamicsSuite Team"
     released_by = "DynamicsSuite Team"
     tags = ["Power Pages", "Portals", "Metadata"]

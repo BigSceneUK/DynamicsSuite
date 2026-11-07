@@ -9,6 +9,8 @@ import logging
 from pathlib import Path
 import re
 import shutil
+import subprocess
+import tarfile
 import urllib.parse
 import urllib.request
 import zipfile
@@ -293,3 +295,245 @@ def uninstall_plugin(plugin_id: str, registry: PluginRegistry) -> tuple[bool, st
     except Exception as exc:
         logging.exception("Failed to uninstall plugin %s: %s", plugin_id, exc)
         return False, f"Uninstall failed: {exc}"
+
+
+def get_plugin_backup_info(plugin_id: str) -> dict | None:
+    """
+    Check if a previous version backup exists in plugins/_{plugin_id}_backup.
+    Returns dict with 'version', 'path' or None if no valid backup exists.
+    """
+    if not re.match(r"^[a-zA-Z0-9_-]+$", plugin_id):
+        return None
+    backup_dir = _PLUGINS_DIR / f"_{plugin_id}_backup"
+    if not backup_dir.exists() or not (backup_dir / "plugin.py").exists():
+        return None
+
+    version = "1.0.0"
+    try:
+        content = (backup_dir / "plugin.py").read_text(encoding="utf-8")
+        m = re.search(r'version\s*=\s*["\']([^"\']+)["\']', content)
+        if m:
+            version = m.group(1).strip()
+    except Exception as exc:
+        logging.warning("Error reading backup version for %s: %s", plugin_id, exc)
+
+    return {
+        "exists": True,
+        "version": version,
+        "path": backup_dir,
+    }
+
+
+def rollback_plugin(plugin_id: str, registry: PluginRegistry) -> tuple[bool, str]:
+    """
+    Restore a plugin from its previous backup folder plugins/_{plugin_id}_backup.
+    Swaps current and backup directories so the action is reversible.
+    """
+    if not re.match(r"^[a-zA-Z0-9_-]+$", plugin_id):
+        return False, f"Invalid plugin identifier: '{plugin_id}'."
+
+    target_dir = _PLUGINS_DIR / plugin_id
+    backup_dir = _PLUGINS_DIR / f"_{plugin_id}_backup"
+
+    if not backup_dir.exists() or not (backup_dir / "plugin.py").exists():
+        return False, f"No backup directory found for plugin '{plugin_id}'."
+
+    backup_info = get_plugin_backup_info(plugin_id)
+    target_ver = backup_info.get("version", "unknown") if backup_info else "unknown"
+
+    temp_swap_dir = _PLUGINS_DIR / f"_{plugin_id}_swap_temp"
+    try:
+        if temp_swap_dir.exists():
+            shutil.rmtree(temp_swap_dir)
+
+        if target_dir.exists():
+            shutil.move(str(target_dir), str(temp_swap_dir))
+
+        shutil.move(str(backup_dir), str(target_dir))
+
+        if temp_swap_dir.exists():
+            shutil.move(str(temp_swap_dir), str(backup_dir))
+
+        registry.install_dependencies(plugin_id)
+        registry.discover(force=True)
+        registry.set_enabled(plugin_id, True)
+        registry.save_config()
+
+        return True, f"Successfully rolled back '{plugin_id}' to v{target_ver}."
+    except Exception as exc:
+        logging.exception("Failed to rollback plugin %s: %s", plugin_id, exc)
+        return False, f"Rollback failed: {exc}"
+
+
+def get_plugin_git_versions(plugin_id: str) -> list[dict]:
+    """
+    Query available versions of this plugin across Git tags from GitHub / local repo.
+    Returns list of dicts: [{'tag': 'v1.0.4', 'version': '1.1.0', 'date': '2026-10-26'}, ...]
+    Deduplicates multiple repository releases that share the identical plugin version.
+    """
+    if not re.match(r"^[a-zA-Z0-9_-]+$", plugin_id):
+        return []
+
+    versions: list[dict] = []
+    seen_tags: set[str] = set()
+    seen_versions: set[str] = set()
+
+    # 1. Try Git if .git exists in repo root
+    git_dir = _REPO_ROOT / ".git"
+    if git_dir.exists():
+        try:
+            # Query both plugin-specific tags and repository release tags
+            tag_patterns = [f"{plugin_id}-v*", f"{plugin_id}@*", f"{plugin_id}/v*", "v*"]
+            all_tags: list[str] = []
+            for pat in tag_patterns:
+                res = subprocess.run(
+                    ["git", "tag", "-l", "--sort=-v:refname", pat],
+                    cwd=str(_REPO_ROOT),
+                    capture_output=True,
+                    text=True,
+                    timeout=5,
+                )
+                if res.returncode == 0:
+                    for t in res.stdout.strip().split("\n"):
+                        t_clean = t.strip()
+                        if t_clean and t_clean not in all_tags:
+                            all_tags.append(t_clean)
+
+            for tag in all_tags:
+                if tag in seen_tags:
+                    continue
+                file_path = f"plugins/{plugin_id}/plugin.py"
+                show_res = subprocess.run(
+                    ["git", "show", f"{tag}:{file_path}"],
+                    cwd=str(_REPO_ROOT),
+                    capture_output=True,
+                    text=True,
+                    timeout=3,
+                )
+                if show_res.returncode == 0:
+                    m = re.search(r'version\s*=\s*["\']([^"\']+)["\']', show_res.stdout)
+                    ver = m.group(1).strip() if m else "1.0.0"
+
+                    # Deduplicate: avoid listing duplicate tags if the plugin version hasn't changed
+                    if ver in seen_versions:
+                        continue
+
+                    date_res = subprocess.run(
+                        ["git", "log", "-1", "--format=%cs", tag],
+                        cwd=str(_REPO_ROOT),
+                        capture_output=True,
+                        text=True,
+                        timeout=3,
+                    )
+                    tag_date = date_res.stdout.strip() if date_res.returncode == 0 else ""
+                    seen_tags.add(tag)
+                    seen_versions.add(ver)
+                    versions.append({
+                        "tag": tag,
+                        "version": ver,
+                        "date": tag_date,
+                        "source": "git",
+                    })
+            if versions:
+                return versions
+        except Exception as exc:
+            logging.warning("Could not query git tags for plugin %s: %s", plugin_id, exc)
+
+    return versions
+
+
+def downgrade_plugin_from_tag(plugin_id: str, tag: str, registry: PluginRegistry) -> tuple[bool, str]:
+    """
+    Downgrade/restore a plugin from a specific Git tag or GitHub release.
+    Backs up the current active plugin folder to plugins/_{plugin_id}_backup before extracting.
+    """
+    if not re.match(r"^[a-zA-Z0-9_-]+$", plugin_id):
+        return False, f"Invalid plugin identifier: '{plugin_id}'."
+    if not re.match(r"^[a-zA-Z0-9_.-]+$", tag):
+        return False, f"Invalid tag name: '{tag}'."
+
+    target_dir = _PLUGINS_DIR / plugin_id
+    backup_dir = _PLUGINS_DIR / f"_{plugin_id}_backup"
+    temp_extract_dir = _PLUGINS_DIR / f"_{plugin_id}_downgrade_temp"
+
+    try:
+        if temp_extract_dir.exists():
+            shutil.rmtree(temp_extract_dir)
+        temp_extract_dir.mkdir(parents=True, exist_ok=True)
+
+        extracted = False
+
+        # Attempt 1: git archive locally if .git exists
+        if (_REPO_ROOT / ".git").exists():
+            cmd = ["git", "archive", tag, f"plugins/{plugin_id}"]
+            proc = subprocess.run(cmd, cwd=str(_REPO_ROOT), capture_output=True, timeout=15)
+            if proc.returncode == 0 and proc.stdout:
+                tar_buf = io.BytesIO(proc.stdout)
+                with tarfile.open(fileobj=tar_buf, mode="r") as tar:
+                    tar.extractall(temp_extract_dir)
+                extracted = True
+
+        # Attempt 2: fallback to GitHub archive zip if git archive unavailable
+        if not extracted:
+            zip_url = f"https://github.com/BigSceneUK/DynamicsSuite/archive/refs/tags/{tag}.zip"
+            req = urllib.request.Request(zip_url, headers={"User-Agent": "DynamicsSuite-PluginStore/1.0"})
+            ssl_ctx = _get_ssl_context()
+            with urllib.request.urlopen(req, timeout=30, context=ssl_ctx) as resp:
+                zip_bytes = resp.read()
+            zip_buffer = io.BytesIO(zip_bytes)
+            with zipfile.ZipFile(zip_buffer, "r") as zf:
+                prefix = f"plugins/{plugin_id}/"
+                for member in zf.namelist():
+                    if prefix in member and not member.endswith("/"):
+                        rel = member[member.find(prefix):]
+                        dest_file = temp_extract_dir / rel
+                        dest_file.parent.mkdir(parents=True, exist_ok=True)
+                        dest_file.write_bytes(zf.read(member))
+                extracted = True
+
+        source_content_dir = temp_extract_dir / "plugins" / plugin_id
+        if not source_content_dir.exists():
+            if (temp_extract_dir / "plugin.py").exists():
+                source_content_dir = temp_extract_dir
+            else:
+                shutil.rmtree(temp_extract_dir, ignore_errors=True)
+                return False, f"Could not find plugin files for '{plugin_id}' in tag '{tag}'."
+
+        if not (source_content_dir / "plugin.py").exists():
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+            return False, f"Invalid plugin archive at tag '{tag}': missing 'plugin.py'."
+
+        # Extract target version string
+        new_version = "unknown"
+        try:
+            content = (source_content_dir / "plugin.py").read_text(encoding="utf-8")
+            m = re.search(r'version\s*=\s*["\']([^"\']+)["\']', content)
+            if m:
+                new_version = m.group(1).strip()
+        except Exception:
+            pass
+
+        # Backup existing target_dir to backup_dir before replacing
+        if target_dir.exists():
+            if backup_dir.exists():
+                shutil.rmtree(backup_dir)
+            shutil.move(str(target_dir), str(backup_dir))
+
+        # Move new files to target_dir
+        shutil.move(str(source_content_dir), str(target_dir))
+
+        # Cleanup temp
+        if temp_extract_dir.exists():
+            shutil.rmtree(temp_extract_dir, ignore_errors=True)
+
+        # Install dependencies & discover
+        registry.install_dependencies(plugin_id)
+        registry.discover(force=True)
+        registry.set_enabled(plugin_id, True)
+        registry.save_config()
+
+        return True, f"Successfully switched '{plugin_id}' to v{new_version} (from {tag})!"
+
+    except Exception as exc:
+        logging.exception("Failed to downgrade plugin %s from tag %s: %s", plugin_id, tag, exc)
+        return False, f"Downgrade failed: {exc}"

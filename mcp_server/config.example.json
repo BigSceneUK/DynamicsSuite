@@ -1,0 +1,26 @@
+{
+  "default_environment": "dev",
+  "environments": {
+    "dev": {
+      "url": "https://yourorg-dev.crm.dynamics.com",
+      "auth_type": "user_cache",
+      "tenant_id": "common",
+      "client_id": "04b07795-8ddb-461a-bbee-02f9e1bf7b46"
+    },
+    "uat": {
+      "url": "https://yourorg-uat.crm.dynamics.com",
+      "auth_type": "service_principal",
+      "tenant_id": "your-azure-tenant-id",
+      "client_id": "your-target-app-registration-id",
+      "client_secret": "your-target-app-registration-secret"
+    },
+    "prod": {
+      "url": "https://yourorg.crm.dynamics.com",
+      "auth_type": "service_principal",
+      "tenant_id": "your-azure-tenant-id",
+      "client_id": "your-target-app-registration-id",
+      "client_secret": "your-target-app-registration-secret"
+    }
+  }
+}
+

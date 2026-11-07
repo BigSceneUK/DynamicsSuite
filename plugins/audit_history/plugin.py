@@ -7,24 +7,18 @@ from plugins.audit_history import ui
 
 
 class AuditHistoryPlugin(PluginBase):
-    name = "Audit History"
+    name = "Audit History Explorer"
     icon = "📜"
     description = (
-        "Browse field-level Dataverse record changes (who changed what and when), "
-        "and correlate updates to identify the responsible Cloud Flows and Classic Processes."
+        "Browse field-level Dataverse record changes — who changed what, "
+        "when, and from which value to which."
     )
-    version = "1.1.1"
-
-    release_date = "2026-10-30"
+    version = "1.1.0"
+    release_date = "2026-11-07"
     author = "DynamicsSuite Team"
     released_by = "DynamicsSuite Team"
     tags = ["Audit", "History", "Compliance"]
     requires_graph = False
-    default_config = {
-        "ignore_flow_name_contains": [
-            "CXP_"
-        ]
-    }
 
     def render(self, ctx: AppContext) -> None:
         if not ctx.org_url:
@@ -42,4 +36,4 @@ class AuditHistoryPlugin(PluginBase):
             return
 
         client = ah_module.DataverseClient(ctx.org_url, token)
-        ui.render_page(ctx, client, plugin=self)
+        ui.render_page(ctx, client)

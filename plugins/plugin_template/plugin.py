@@ -14,8 +14,8 @@ class PluginTemplatePlugin(PluginBase):
     name = "Plugin Development Project Template"
     icon = "🧩"
     description = "Starter template and reference implementation for building custom DynamicsSuite plugins."
-    version = "1.0.0"
-    release_date = "2026-09-09"
+    version = "1.1.0"
+    release_date = "2026-11-07"
     author = "DynamicsSuite Team"
     released_by = "DynamicsSuite Team"
     tags = ["Template", "Development", "Dataverse", "SDK"]

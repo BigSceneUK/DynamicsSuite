@@ -33,3 +33,7 @@ class AppContext:
 
     # Reference to the GraphAuth instance — DO NOT replace; use its methods
     auth: object = field(default=None, repr=False)
+
+    # Multi-account support
+    active_account_id: str = ""
+    accounts: list[dict] = field(default_factory=list)

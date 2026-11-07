@@ -3194,6 +3194,20 @@ class PortalWebApiAuditorClient:
                     if var_arg and not table_raw:
                         val = local_vars.get(var_arg, "").strip()
 
+                        # 1a. Unwrap array-indexed dereferences: e.g. `var foundId = result[0]`
+                        # In this case val = 'result[0]'. We must look up the base variable
+                        # ('result') in local_vars to find the actual value. If the base variable
+                        # resolves to a function call we can resolve via query_helpers; if it
+                        # doesn't resolve cleanly we skip entirely rather than treating the base
+                        # variable name (e.g. 'result') as a Dataverse table name.
+                        m_array_access = re.match(r"""^([a-zA-Z0-9_$]+)\s*\[\s*[^\]]+\s*\](.*)$""", val)
+                        if m_array_access:
+                            base_var = m_array_access.group(1).strip()
+                            val = local_vars.get(base_var, "").strip()
+                            if not val:
+                                # Base variable is not in local scope — skip to avoid false positives.
+                                continue
+
                         # 1. Check if val is a function call: e.g. getAgentContactsByAgentOrgQuery(UserOrgnisationID)
                         m_fn = re.match(r"""^([a-zA-Z0-9_]+)\s*\(.*\)""", val)
                         if m_fn:
@@ -3239,15 +3253,36 @@ class PortalWebApiAuditorClient:
                         m_val = re.match(r"""^([a-zA-Z0-9_]+)(?:\([^\)]*\))?(.*)$""", val)
                         if m_val:
                             cand = m_val.group(1).strip()
+                            # Skip if the remaining suffix contains array-index notation — the
+                            # candidate is a JS variable/array access, not a Dataverse table name.
+                            cand_suffix = m_val.group(2).strip()
+                            if cand_suffix.startswith("["):
+                                continue
                             if not cand.lower().endswith("query") and not cand.lower().startswith("get"):
                                 table_raw = cand
-                                query_part = m_val.group(2).strip()
+                                query_part = cand_suffix
 
                     if not table_raw:
                         continue
 
                     # Reject function names mistakenly captured as table names
                     if table_raw.lower().endswith("query") or (table_raw.lower().startswith("get") and len(table_raw) > 10):
+                        continue
+
+                    # Reject common JavaScript variable/property names that are never
+                    # Dataverse entity set names. These arise when a wrapper function is
+                    # called with a plain JS variable (e.g. result, odataurl, data, url,
+                    # response) that couldn't be fully resolved from local scope.
+                    _JS_NON_TABLE_NAMES = {
+                        "result", "results", "response", "data", "value", "values",
+                        "odataurl", "odata", "url", "querystring", "query", "options",
+                        "settings", "config", "params", "payload", "body", "args",
+                        "callback", "error", "err", "res", "req", "obj", "item",
+                        "items", "record", "records", "entity", "entityid", "id",
+                        "token", "headers", "output", "input", "eventargs", "event",
+                        "context", "ctx", "scope", "self", "that", "this",
+                    }
+                    if table_raw.lower() in _JS_NON_TABLE_NAMES:
                         continue
 
                     logical_table = self.resolve_entity_name(table_raw)

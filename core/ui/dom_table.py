@@ -76,7 +76,7 @@ def render_dom_table(
         empty_message: Message to show when data is empty.
         column_config: Special display config per column:
             - {"type": "progress", "min": 0.0, "max": 1.0, "format": "%.1f%%"}
-            - {"type": "link", "text": "View"}
+            - {"type": "link" | "button", "text": "Open Run", "icon": "↗"}
             - {"type": "badge"}
             - {"type": "code"}
         formatters: Custom formatting functions mapping field -> formatted string.
@@ -336,10 +336,10 @@ def render_dom_table(
                             label_visibility="collapsed",
                         )
 
-                for col_idx, (col_field, _, _) in enumerate(norm_columns):
+                for col_idx, (col_field, col_label, _) in enumerate(norm_columns):
                     with row_cols[col_idx + offset]:
                         raw_val = item.get(col_field)
-                        cfg = (column_config or {}).get(col_field)
+                        cfg = (column_config or {}).get(col_field) or (column_config or {}).get(col_label)
 
                         # Formatter function override
                         if formatters and col_field in formatters:
@@ -374,20 +374,94 @@ def render_dom_table(
                         # Special Badge Column
                         if isinstance(cfg, dict) and cfg.get("type") == "badge":
                             val_str = str(raw_val or "")
-                            badge_color = "#3b82f6"
-                            badge_bg = "rgba(59, 130, 246, 0.12)"
-                            if val_str.lower() in ("yes", "full", "active", "true", "success"):
-                                badge_color = "#16a34a"
-                                badge_bg = "rgba(22, 163, 74, 0.12)"
-                            elif val_str.lower() in ("no", "sample", "inactive", "false", "failed"):
-                                badge_color = "#d97706"
-                                badge_bg = "rgba(217, 119, 6, 0.12)"
+                            val_lower = val_str.lower().strip()
+                            color_map = cfg.get("color_map") or cfg.get("colors") or {}
+
+                            if val_lower in color_map:
+                                custom_c = color_map[val_lower]
+                                if isinstance(custom_c, (tuple, list)) and len(custom_c) >= 2:
+                                    badge_color, badge_bg = custom_c[0], custom_c[1]
+                                    badge_border = custom_c[2] if len(custom_c) > 2 else f"1px solid {badge_color}40"
+                                elif isinstance(custom_c, str):
+                                    badge_color = custom_c
+                                    badge_bg = f"{custom_c}1f"
+                                    badge_border = f"1px solid {custom_c}40"
+                                else:
+                                    badge_color = "#3b82f6"
+                                    badge_bg = "rgba(59, 130, 246, 0.12)"
+                                    badge_border = "1px solid rgba(59, 130, 246, 0.25)"
+                            elif val_lower in ("succeeded", "success", "active", "yes", "true", "full", "completed", "passed"):
+                                badge_color = "#22c55e"
+                                badge_bg = "rgba(34, 197, 94, 0.14)"
+                                badge_border = "1px solid rgba(34, 197, 94, 0.3)"
+                            elif val_lower in ("failed", "failure", "error", "faulted", "aborted"):
+                                badge_color = "#ef4444"
+                                badge_bg = "rgba(239, 68, 68, 0.14)"
+                                badge_border = "1px solid rgba(239, 68, 68, 0.3)"
+                            elif val_lower in ("cancelled", "canceled", "warning", "warn", "inactive", "no", "false", "sample", "partiallysucceeded", "partial"):
+                                badge_color = "#f59e0b"
+                                badge_bg = "rgba(245, 158, 11, 0.14)"
+                                badge_border = "1px solid rgba(245, 158, 11, 0.3)"
+                            elif val_lower in ("timedout", "timeout"):
+                                badge_color = "#f43f5e"
+                                badge_bg = "rgba(244, 63, 94, 0.14)"
+                                badge_border = "1px solid rgba(244, 63, 94, 0.3)"
+                            elif val_lower in ("running", "inprogress", "in progress", "processing", "executing"):
+                                badge_color = "#3b82f6"
+                                badge_bg = "rgba(59, 130, 246, 0.14)"
+                                badge_border = "1px solid rgba(59, 130, 246, 0.3)"
+                            elif val_lower in ("waiting", "queued", "pending", "suspended", "paused"):
+                                badge_color = "#a855f7"
+                                badge_bg = "rgba(168, 85, 247, 0.14)"
+                                badge_border = "1px solid rgba(168, 85, 247, 0.3)"
+                            else:
+                                badge_color = "#94a3b8"
+                                badge_bg = "rgba(148, 163, 184, 0.14)"
+                                badge_border = "1px solid rgba(148, 163, 184, 0.25)"
 
                             st.markdown(
-                                f"<span style='font-size:0.75rem; font-weight:600; padding:2px 7px; border-radius:4px; "
-                                f"background:{badge_bg}; color:{badge_color};'>{html.escape(val_str)}</span>",
+                                f"<span style='font-size:0.75rem; font-weight:600; padding:2px 8px; border-radius:4px; "
+                                f"background:{badge_bg}; color:{badge_color}; border:{badge_border}; display:inline-block; line-height:1.2;'>"
+                                f"{html.escape(val_str)}</span>",
                                 unsafe_allow_html=True,
                             )
+                            continue
+
+                        # Special Link / Button Column
+                        is_link = False
+                        link_text = "Open"
+                        link_icon = "↗"
+                        if isinstance(cfg, dict) and cfg.get("type") in ("link", "button"):
+                            is_link = True
+                            link_text = cfg.get("text") or cfg.get("display_text") or "Open"
+                            link_icon = cfg.get("icon", "↗")
+                        elif isinstance(cfg, str) and cfg in ("link", "button"):
+                            is_link = True
+                        elif col_label in ("Open Run", "Run Link", "Flow Link") or col_field in ("Open Run", "Run Link", "Flow Link"):
+                            val_url_check = str(raw_val or "").strip()
+                            if val_url_check.startswith(("http://", "https://")):
+                                is_link = True
+                                link_text = "Open Run" if "Run" in (col_label + col_field) else "Open"
+                                link_icon = "↗"
+
+                        if is_link:
+                            val_url = str(raw_val or "").strip()
+                            if not val_url or val_url.lower() in ("none", "nan", "—", ""):
+                                st.markdown(
+                                    "<span style='color: #94a3b8; font-style: italic; font-size: 0.82rem;'>—</span>",
+                                    unsafe_allow_html=True,
+                                )
+                            else:
+                                display_text = f"{link_text} {link_icon}".strip() if link_icon else link_text
+                                st.markdown(
+                                    f"<a href='{html.escape(val_url)}' target='_blank' rel='noopener noreferrer' style='"
+                                    f"display: inline-flex; align-items: center; justify-content: center; gap: 4px; "
+                                    f"padding: 2px 8px; font-size: 0.78rem; font-weight: 500; color: #38bdf8; "
+                                    f"background: rgba(56, 189, 248, 0.1); border: 1px solid rgba(56, 189, 248, 0.28); "
+                                    f"border-radius: 4px; text-decoration: none; white-space: nowrap; line-height: 1.3;"
+                                    f"'>{html.escape(display_text)}</a>",
+                                    unsafe_allow_html=True,
+                                )
                             continue
 
                         # Default text/string/code rendering

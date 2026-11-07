@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [1.0.5] - 2026-11-07
+
+### 🤖 Model Context Protocol (MCP) Server Integration (`mcp_server` v1.1.0)
+- **Built-in Local MCP Server**:
+  - Implemented high-performance local MCP server (`mcp_server/`) supporting JSON-RPC and SSE transports.
+  - Seamlessly connects AI coding assistants and agents (Claude Code, Cursor, Antigravity, custom agents) directly to Microsoft Dynamics 365 & Dataverse.
+  - Automatic tool registration from plugins via `mcp_tools.py` contracts across `audit_history`, `cloud_flow`, `portal_inspector`, `portal_webapi_auditor`, `record_transporter`, and `table_inspector`.
+  - Service account profile manager (`core/service_accounts.py`) for automated background access with token security.
+  - Dedicated MCP Server control center plugin (`plugins/mcp_server/`) for port configuration, real-time log monitoring, and connection verification.
+
+### ⚡ Performance & High-Capacity UI (DOM Table Renderer)
+- **Lightweight Pure DOM Virtualized Table**:
+  - Integrated `core/ui/dom_table.py` across `audit_history`, `cloud_flow`, `record_transporter`, and `table_inspector` plugins.
+  - Drastically speeds up rendering for large Dataverse datasets with client-side instant search, dynamic column sorting, and pagination without Streamlit re-run overhead.
+
+### 🔄 Plugin Manager & Store Enhancements
+- **Version Management & Downgrade Support**:
+  - Added full rollback / downgrade capabilities to specific previous versions via GitHub release tag artifacts.
+  - Added automated version verification, release date stamping, and AST validation in plugin management tooling.
+
+### 📦 All Plugins Minor Version Updates
+- Updated all active plugins to their next minor version with MCP tool discovery and DOM table rendering support:
+  - `audit_history` v1.0.0 -> **v1.1.0**
+  - `cloud_flow` v1.0.0 -> **v1.1.0**
+  - `mcp_server` v1.0.0 -> **v1.1.0**
+  - `plugin_template` v1.0.0 -> **v1.1.0**
+  - `portal_inspector` v1.1.0 -> **v1.2.0**
+  - `portal_webapi_auditor` v1.4.0 -> **v1.5.0**
+  - `record_transporter` v1.0.0 -> **v1.1.0**
+  - `table_inspector` v1.1.0 -> **v1.2.0**
+
+---
+
 ## [1.0.4] - 2026-10-26
 
 ### 🛡️ Power Pages Web API Auditor (`portal_webapi_auditor` v1.4.0)

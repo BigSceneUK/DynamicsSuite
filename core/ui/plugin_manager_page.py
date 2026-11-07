@@ -19,6 +19,10 @@ from core.plugin_store import (
     get_plugin_status,
     install_or_update_plugin,
     uninstall_plugin,
+    get_plugin_backup_info,
+    rollback_plugin,
+    get_plugin_git_versions,
+    downgrade_plugin_from_tag,
 )
 from core.ui import update_banner
 
@@ -99,6 +103,114 @@ else:
         pass
 
 
+def _render_version_manager_content(
+    plugin_id: str,
+    title: str,
+    current_ver: str,
+    registry: PluginRegistry,
+    is_inline: bool = False,
+) -> None:
+    st.subheader(f"⚙️ {title} — Version Management")
+    st.caption(f"Plugin ID: `{plugin_id}` • Currently installed: **v{current_ver}**")
+
+    # --- Section 1: Previous Local Backup Rollback ---
+    st.markdown("##### ↩️ Quick Rollback (Local Backup)")
+    backup_info = get_plugin_backup_info(plugin_id)
+    if backup_info:
+        backup_ver = backup_info.get("version", "unknown")
+        st.info(f"📦 Prior version **v{backup_ver}** is preserved on disk in `plugins/_{plugin_id}_backup`.")
+        if st.button(
+            f"↩️ Rollback to v{backup_ver} (Local Backup)",
+            key=f"btn_rb_{plugin_id}",
+            type="primary",
+            use_container_width=True,
+        ):
+            with st.spinner(f"Rolling back {title} to v{backup_ver}..."):
+                ok, msg = rollback_plugin(plugin_id, registry)
+                if ok:
+                    update_banner.clear_update_cache()
+                    st.success(msg)
+                    st.rerun()
+                else:
+                    st.error(msg)
+    else:
+        st.caption("No previous local backup folder found for this plugin on disk.")
+
+    st.markdown("---")
+
+    # --- Section 2: Historical Releases from GitHub / Git Tags ---
+    st.markdown("##### 🏷️ Switch to Specific Release from GitHub")
+    st.caption(
+        "Select a historical plugin version tracked within repository releases on GitHub "
+        "([BigSceneUK/DynamicsSuite](https://github.com/BigSceneUK/DynamicsSuite)):"
+    )
+
+    with st.spinner("Checking available release tags..."):
+        git_versions = get_plugin_git_versions(plugin_id)
+
+    if git_versions:
+        options = []
+        tag_map = {}
+        for gv in git_versions:
+            tag = gv["tag"]
+            ver = gv["version"]
+            date = gv.get("date", "")
+            is_curr = (ver == current_ver)
+            date_str = f" • {date}" if date else ""
+            curr_str = " [Installed]" if is_curr else ""
+            label = f"v{ver} (DynamicsSuite release {tag}{date_str}){curr_str}"
+            options.append(label)
+            tag_map[label] = (tag, ver)
+
+        selected_label = st.selectbox(
+            "Select Plugin Version:",
+            options=options,
+            key=f"sel_tag_{plugin_id}",
+            help="Select the version of this plugin to switch to. The tag indicates the corresponding GitHub release.",
+        )
+
+        if selected_label:
+            sel_tag, sel_ver = tag_map[selected_label]
+            is_same = (sel_ver == current_ver)
+            btn_label = f"🔄 Reinstall v{sel_ver} (from {sel_tag})" if is_same else f"⬇️ Switch / Downgrade to v{sel_ver} (from {sel_tag})"
+            btn_type = "secondary" if is_same else "primary"
+            if st.button(
+                btn_label,
+                key=f"btn_apply_tag_{plugin_id}",
+                type=btn_type,
+                use_container_width=True,
+            ):
+                with st.spinner(f"Extracting and applying v{sel_ver} ({sel_tag}) for {title}..."):
+                    ok, msg = downgrade_plugin_from_tag(plugin_id, sel_tag, registry)
+                    if ok:
+                        update_banner.clear_update_cache()
+                        st.success(msg)
+                        st.rerun()
+                    else:
+                        st.error(msg)
+    else:
+        st.caption("No historical release tags found for this plugin.")
+
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    if is_inline:
+        if st.button("✖ Close Version Manager", key=f"close_inline_ver_{plugin_id}", use_container_width=True):
+            if "managing_version_plugin" in st.session_state:
+                del st.session_state["managing_version_plugin"]
+            st.rerun()
+    else:
+        if st.button("Close", key=f"dlg_close_ver_{plugin_id}", use_container_width=True):
+            st.rerun()
+
+
+if hasattr(st, "dialog"):
+    @st.dialog("⏪ Version Management & Rollback", width="medium")
+    def _show_version_dialog(plugin_id: str, title: str, current_ver: str, registry: PluginRegistry):
+        _render_version_manager_content(plugin_id, title, current_ver, registry, is_inline=False)
+else:
+    def _show_version_dialog(plugin_id: str, title: str, current_ver: str, registry: PluginRegistry):
+        pass
+
+
 _VIEW_KEY = "pm_view_mode"  # "card" | "list"
 
 
@@ -121,6 +233,21 @@ def render(registry: PluginRegistry) -> None:
         _render_store_tab(registry)
 
     _render_guide_inline_fallback()
+    _render_version_inline_fallback(registry)
+
+
+def _render_version_inline_fallback(registry: PluginRegistry) -> None:
+    ver_info = st.session_state.get("managing_version_plugin")
+    if not ver_info:
+        return
+    st.markdown("---")
+    _render_version_manager_content(
+        plugin_id=ver_info.get("id", ""),
+        title=ver_info.get("title", ""),
+        current_ver=ver_info.get("ver", "1.0.0"),
+        registry=registry,
+        is_inline=True,
+    )
 
 
 def _render_guide_inline_fallback() -> None:
@@ -352,7 +479,7 @@ def _render_card_view(registry, entries) -> None:
             )
             st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
 
-            btn_col1, btn_col2, btn_col3 = st.columns([1, 1, 1])
+            btn_col1, btn_col2 = st.columns([1.2, 1])
             with btn_col1:
                 use_disabled = not entry.enabled or bool(entry.load_error) or bool(missing_deps)
                 if st.button(
@@ -371,32 +498,10 @@ def _render_card_view(registry, entries) -> None:
                     key=f"cfg_card_{entry.plugin_id}",
                     use_container_width=True,
                     disabled=cfg_disabled,
+                    help="Configure settings, view guide & manage versions",
                 ):
                     st.session_state["configuring_plugin_id"] = entry.plugin_id
                     st.rerun()
-            with btn_col3:
-                if st.button(
-                    "📖 Guide",
-                    key=f"guide_card_{entry.plugin_id}",
-                    use_container_width=True,
-                ):
-                    readme_md = _get_local_readme(entry.plugin_id)
-                    p_inst = entry.instance
-                    title = p_inst.name if p_inst else entry.plugin_id
-                    icon = p_inst.icon if p_inst else "🔌"
-                    ver = str(p_inst.version) if p_inst else "1.0.0"
-                    author = getattr(p_inst, "author", "DynamicsSuite Team") if p_inst else "DynamicsSuite Team"
-                    rdate = getattr(p_inst, "release_date", "") if p_inst else ""
-                    repo = getattr(p_inst, "repo_url", "") if p_inst else ""
-                    issues = getattr(p_inst, "issues_url", "") if p_inst else ""
-                    if hasattr(st, "dialog"):
-                        _show_guide_modal(title, icon, ver, author, rdate, readme_md, repo, issues)
-                    else:
-                        st.session_state["viewing_guide_plugin"] = {
-                            "title": title, "icon": icon, "ver": ver, "author": author,
-                            "release_date": rdate, "readme": readme_md, "repo_url": repo, "issues_url": issues
-                        }
-                        st.rerun()
 
             st.markdown("<div style='height:12px'></div>", unsafe_allow_html=True)
 
@@ -407,7 +512,7 @@ def _render_list_view(registry, entries) -> None:
         missing_deps = getattr(entry, "missing_deps", [])
         badge = _plugin_status_badge(entry.enabled, entry.load_error, missing_deps)
 
-        col_icon, col_info, col_actions = st.columns([0.6, 7, 2.5])
+        col_icon, col_info, col_actions = st.columns([0.6, 7.4, 2.0])
 
         with col_icon:
             icon_char = "⚠️" if missing_deps else ("❌" if entry.load_error else p.icon)
@@ -443,7 +548,7 @@ def _render_list_view(registry, entries) -> None:
                         else:
                             st.error("Failed!")
             else:
-                a1, a2, a3 = st.columns(3)
+                a1, a2 = st.columns(2)
                 with a1:
                     use_disabled = not entry.enabled or bool(entry.load_error) or bool(missing_deps)
                     if st.button(
@@ -462,32 +567,10 @@ def _render_list_view(registry, entries) -> None:
                         key=f"cfg_list_{entry.plugin_id}",
                         use_container_width=True,
                         disabled=cfg_disabled,
+                        help="Configure settings, view guide & manage versions",
                     ):
                         st.session_state["configuring_plugin_id"] = entry.plugin_id
                         st.rerun()
-                with a3:
-                    if st.button(
-                        "📖 Guide",
-                        key=f"guide_list_{entry.plugin_id}",
-                        use_container_width=True,
-                    ):
-                        readme_md = _get_local_readme(entry.plugin_id)
-                        p_inst = entry.instance
-                        title = p_inst.name if p_inst else entry.plugin_id
-                        icon = p_inst.icon if p_inst else "🔌"
-                        ver = str(p_inst.version) if p_inst else "1.0.0"
-                        author = getattr(p_inst, "author", "DynamicsSuite Team") if p_inst else "DynamicsSuite Team"
-                        rdate = getattr(p_inst, "release_date", "") if p_inst else ""
-                        repo = getattr(p_inst, "repo_url", "") if p_inst else ""
-                        issues = getattr(p_inst, "issues_url", "") if p_inst else ""
-                        if hasattr(st, "dialog"):
-                            _show_guide_modal(title, icon, ver, author, rdate, readme_md, repo, issues)
-                        else:
-                            st.session_state["viewing_guide_plugin"] = {
-                                "title": title, "icon": icon, "ver": ver, "author": author,
-                                "release_date": rdate, "readme": readme_md, "repo_url": repo, "issues_url": issues
-                            }
-                            st.rerun()
 
         st.divider()
 
@@ -497,7 +580,7 @@ def _on_dialog_dismiss() -> None:
 
 
 if hasattr(st, "dialog"):
-    @st.dialog("⚙️ Plugin Configuration", width="large", on_dismiss=_on_dialog_dismiss)
+    @st.dialog("⚙️ Plugin Configuration & Guide", width="large", on_dismiss=_on_dialog_dismiss)
     def _show_configure_dialog_modal(registry: PluginRegistry, plugin_id: str) -> None:
         _render_configure_content(registry, plugin_id, is_modal=True)
 else:
@@ -530,19 +613,67 @@ def _render_configure_content(registry: PluginRegistry, cfg_id: str, is_modal: b
         return
 
     p = entry.instance
+    if p is None:
+        title = cfg_id.replace("_", " ").title()
+        missing_deps = getattr(entry, "missing_deps", [])
+        icon = "⚠️" if missing_deps else "❌"
+
+        if not is_modal:
+            st.markdown("---")
+            st.subheader(f"⚙️  Configure & Diagnostics — {title}")
+        else:
+            st.subheader(f"{icon}  {title}")
+
+        st.caption(f"Plugin ID: `{cfg_id}` • Status: Unloaded / Error")
+
+        if missing_deps:
+            st.error(f"**Missing Dependencies**: `{', '.join(missing_deps)}`")
+            if st.button("📥 Install Dependencies", key=f"cfg_install_deps_{cfg_id}", type="primary"):
+                with st.spinner("Installing plugin dependencies..."):
+                    if registry.install_dependencies(cfg_id):
+                        st.success("Dependencies installed successfully!")
+                        st.rerun()
+                    else:
+                        st.error("Failed to install dependencies.")
+        elif entry.load_error:
+            st.error(f"**Plugin Load Error**:\n\n```\n{entry.load_error}\n```")
+
+        # Offer version rollback / switch even if plugin is currently broken
+        tab_ver, tab_info = st.tabs(["⏪ Versions & Rollback", "ℹ️ Diagnostics"])
+        with tab_ver:
+            _render_version_manager_content(cfg_id, title, "error", registry, is_inline=True)
+        with tab_info:
+            st.markdown("This plugin encountered an error during initialization. You can revert to a previously working backup or switch to a different release version using the tab above.")
+
+        st.markdown("---")
+        if st.button("✖  Close", key=f"cfg_close_{cfg_id}", use_container_width=True):
+            st.session_state.pop("configuring_plugin_id", None)
+            st.rerun()
+        return
+
+    author = getattr(p, "author", "DynamicsSuite Team")
+    release_date = getattr(p, "release_date", "")
+    repo_url = getattr(p, "repo_url", "")
+    issues_url = getattr(p, "issues_url", "")
+
     if not is_modal:
         st.markdown("---")
-        st.subheader(f"⚙️  Configure — {p.name}")
+        st.subheader(f"⚙️  Configure & Guide — {p.name}")
     else:
         st.subheader(f"{p.icon}  {p.name}")
 
     col_meta, col_toggle = st.columns([7, 2])
     with col_meta:
-        st.markdown(
-            f"**Version:** `{p.version}`  \n"
-            f"**Plugin ID:** `{cfg_id}`  \n"
-            f"**Description:** {p.description}"
-        )
+        date_str = f" • Released {release_date}" if release_date else ""
+        st.caption(f"v{p.version} • by {author}{date_str} • Plugin ID: `{cfg_id}`")
+        if repo_url or issues_url:
+            links = []
+            if repo_url:
+                links.append(f"[🐙 View on GitHub]({repo_url})")
+            if issues_url:
+                links.append(f"[🐞 Report Issue]({issues_url})")
+            st.markdown(" • ".join(links))
+        st.markdown(f"*{p.description}*")
     with col_toggle:
         new_enabled = st.toggle(
             "Enabled",
@@ -558,13 +689,40 @@ def _render_configure_content(registry: PluginRegistry, cfg_id: str, is_modal: b
     has_custom_ui = type(p).render_config is not PluginBase.render_config
 
     if has_custom_ui:
-        tab_form, tab_json = st.tabs(["🎛️ Settings Form", "📝 JSON Configuration"])
+        tab_guide, tab_form, tab_json, tab_ver = st.tabs([
+            "📖 Guide & Info",
+            "🎛️ Settings Form",
+            "📝 JSON Configuration",
+            "⏪ Versions & Rollback",
+        ])
+        with tab_guide:
+            readme_md = _get_local_readme(cfg_id)
+            if readme_md:
+                st.markdown(_safe_markdown(readme_md), unsafe_allow_html=True)
+            else:
+                st.info("No README.md documentation provided for this plugin.")
         with tab_form:
             p.render_config()
         with tab_json:
             _render_json_config_editor(registry, cfg_id, p)
+        with tab_ver:
+            _render_version_manager_content(cfg_id, p.name, str(p.version), registry, is_inline=True)
     else:
-        _render_json_config_editor(registry, cfg_id, p)
+        tab_guide, tab_json, tab_ver = st.tabs([
+            "📖 Guide & Info",
+            "⚙️ Configuration",
+            "⏪ Versions & Rollback",
+        ])
+        with tab_guide:
+            readme_md = _get_local_readme(cfg_id)
+            if readme_md:
+                st.markdown(_safe_markdown(readme_md), unsafe_allow_html=True)
+            else:
+                st.info("No README.md documentation provided for this plugin.")
+        with tab_json:
+            _render_json_config_editor(registry, cfg_id, p)
+        with tab_ver:
+            _render_version_manager_content(cfg_id, p.name, str(p.version), registry, is_inline=True)
 
     st.markdown("---")
     if st.button("✖  Close", key=f"cfg_close_{cfg_id}", use_container_width=True):
@@ -820,7 +978,7 @@ def _render_store_tab(registry: PluginRegistry) -> None:
                             }
                             st.rerun()
             elif status == PluginStatus.UPDATE_AVAILABLE:
-                c_upd, c_guide = st.columns([6.5, 3.5])
+                c_upd, c_ver, c_guide = st.columns([4.2, 3.3, 2.5])
                 with c_upd:
                     if st.button(
                         f"🔄 Update",
@@ -836,6 +994,20 @@ def _render_store_tab(registry: PluginRegistry) -> None:
                                 st.rerun()
                             else:
                                 st.error(msg)
+                with c_ver:
+                    if st.button(
+                        "⏪ Ver",
+                        key=f"store_ver_upd_{sp.id}",
+                        use_container_width=True,
+                        help="Manage versions, downgrade, or rollback to backup",
+                    ):
+                        if hasattr(st, "dialog"):
+                            _show_version_dialog(sp.id, sp.name, installed_ver or sp.version, registry)
+                        else:
+                            st.session_state["managing_version_plugin"] = {
+                                "id": sp.id, "title": sp.name, "ver": installed_ver or sp.version
+                            }
+                            st.rerun()
                 with c_guide:
                     if st.button(
                         "📖 Guide",
@@ -852,7 +1024,7 @@ def _render_store_tab(registry: PluginRegistry) -> None:
                             }
                             st.rerun()
             else:
-                c_use, c_guide, c_del = st.columns([4.5, 3.5, 2.0])
+                c_use, c_ver, c_guide, c_del = st.columns([3.5, 3.0, 2.5, 1.0])
                 with c_use:
                     if st.button(
                         "▶ Use",
@@ -862,6 +1034,20 @@ def _render_store_tab(registry: PluginRegistry) -> None:
                     ):
                         st.session_state["selected_plugin_id"] = sp.id
                         st.rerun()
+                with c_ver:
+                    if st.button(
+                        "⏪ Ver",
+                        key=f"store_ver_{sp.id}",
+                        use_container_width=True,
+                        help="Manage versions, downgrade, or rollback to backup",
+                    ):
+                        if hasattr(st, "dialog"):
+                            _show_version_dialog(sp.id, sp.name, installed_ver or sp.version, registry)
+                        else:
+                            st.session_state["managing_version_plugin"] = {
+                                "id": sp.id, "title": sp.name, "ver": installed_ver or sp.version
+                            }
+                            st.rerun()
                 with c_guide:
                     if st.button(
                         "📖 Guide",

@@ -105,14 +105,15 @@ def render() -> None:
                 st.error("Invalid Dataverse URL format.")
                 return
 
-        # Initialise MSAL cache for this session
+        # Initialise in-memory MSAL cache for this session (zero disk storage)
         if "msal_cache" not in st.session_state:
-            st.session_state["msal_cache"] = msal.SerializableTokenCache()
+            st.session_state["msal_cache"] = msal.TokenCache()
 
         auth = GraphAuth(
             client_id=active_client_id,
             tenant_id=active_tenant_id,
             token_cache=st.session_state["msal_cache"],
+            persist_cache=False,
         )
 
         # Step 1 — Sign in with Microsoft (Graph only).
@@ -127,19 +128,82 @@ def render() -> None:
                 result = auth.login(scopes=scopes, force_select_account=True)
 
             # Step 2 — Acquire Dataverse token separately (incremental consent).
+            env_name = ""
             if org_url:
                 with st.spinner("Connecting to Power Platform… (Step 2 of 2)"):
                     try:
                         auth.acquire_token_for_resource(org_url)
+                        try:
+                            dv_token = auth.get_token(org_url)
+                            headers = {
+                                "Authorization": f"Bearer {dv_token}",
+                                "Accept": "application/json",
+                                "OData-MaxVersion": "4.0",
+                                "OData-Version": "4.0",
+                            }
+                            # Try RetrieveCurrentOrganization for friendly name
+                            api_url = f"{org_url.rstrip('/')}/api/data/v9.2/RetrieveCurrentOrganization(AccessType=Microsoft.Dynamics.CRM.EndpointAccessType'Internet')"
+                            import requests
+                            res = requests.get(api_url, headers=headers, timeout=5)
+                            if res.status_code == 200:
+                                detail = res.json().get("Detail", {})
+                                fname = detail.get("FriendlyName")
+                                if fname and not fname.lower().startswith("unq"):
+                                    env_name = fname
+                        except Exception as e:
+                            import logging
+                            logging.warning(f"Could not fetch environment name from Dataverse: {e}")
                     except Exception as dv_exc:
                         st.warning(
                             f"Power Platform token could not be acquired at sign-in: {dv_exc}  \n"
                             "You can still proceed — the token will be requested when a plugin needs it."
                         )
 
+            # Step 2.5 — Acquire BAP token and fetch friendly name from BAP API
+            if env_id:
+                try:
+                    auth.acquire_token_for_resource("https://api.bap.microsoft.com/")
+                    bap_token = auth.get_token("https://api.bap.microsoft.com/")
+                    headers = {
+                        "Authorization": f"Bearer {bap_token}",
+                        "Accept": "application/json",
+                    }
+                    api_url = f"https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/scopes/admin/environments/{env_id}?api-version=2021-04-01"
+                    import requests
+                    res = requests.get(api_url, headers=headers, timeout=5)
+                    if res.status_code in (403, 404):
+                        api_url = f"https://api.bap.microsoft.com/providers/Microsoft.BusinessAppPlatform/environments/{env_id}?api-version=2021-04-01"
+                        res = requests.get(api_url, headers=headers, timeout=5)
+                    
+                    if res.status_code == 200:
+                        env_data = res.json()
+                        displayName = env_data.get("properties", {}).get("displayName", "")
+                        if displayName:
+                            env_name = displayName
+                except Exception as bap_exc:
+                    import logging
+                    logging.warning(f"BAP friendly name fetch failed: {bap_exc}")
+
+            # Fallback to subdomain/host of org_url if API name could not be retrieved
+            if not env_name and org_url:
+                from urllib.parse import urlparse
+                try:
+                    parsed = urlparse(org_url)
+                    if parsed.netloc:
+                        parts = parsed.netloc.split('.')
+                        if parts:
+                            env_name = parts[0]
+                except Exception:
+                    pass
+
+            if not env_name and env_id:
+                env_name = env_id
+
             account = auth.get_current_account()
             display_name = account.get("name", "User") if account else "User"
             email = account.get("username", "") if account else ""
+
+            # In-memory session: sensitive tokens and session details remain in RAM only
 
             ctx = AppContext(
                 user_display_name=display_name,
@@ -148,6 +212,7 @@ def render() -> None:
                 tenant_id=active_tenant_id,
                 org_url=org_url,
                 env_id=env_id,
+                environment_name=env_name,
                 msal_cache=st.session_state["msal_cache"],
                 auth=auth,
             )

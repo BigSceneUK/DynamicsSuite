@@ -6,8 +6,8 @@ class TableInspectorPlugin(PluginBase):
     name = "Table Inspector"
     icon = "🔍"
     description = "Inspect table attributes, metadata, form placement, and data usage statistics."
-    version = "1.1.1"
-    release_date = "2026-10-30"
+    version = "1.2.0"
+    release_date = "2026-11-07"
     author = "DynamicsSuite Team"
     released_by = "DynamicsSuite Team"
     tags = ["Metadata", "Dataverse", "Schema"]
